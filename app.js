@@ -1,0 +1,1646 @@
+/* The Ratio Decider: app UI. Engine maths lives in engine.js; this file only renders and stores. */
+(function () {
+  'use strict';
+  var E = window.RatioEngine, LEX = window.RD_LEXICON, BASE_ORIGINS = window.RD_ORIGINS;
+  var ATTRS = E.ATTRS, TATTRS = E.TARGET_ATTRS, AL = E.ATTR_LABEL;
+  var BEAN_COLORS = ['var(--b1)', 'var(--b2)', 'var(--b3)', 'var(--b4)', 'var(--b5)'];
+  var SPECIES = ['arabica', 'robusta', 'liberica', 'excelsa'];
+  var PROCS = E.PROCESS_KEYS;
+  var BAGS = [250, 500, 1000];
+  var ROAST_NAMES = ['', 'light', 'light-medium', 'medium', 'medium-dark', 'dark'];
+  var ROUTES = [
+    ['simulator', 'Simulator'], ['beans', 'My beans'], ['cupping', 'Cupping log'], ['blends', 'Blends'], ['sheet', 'Spec sheet'],
+    ['batches', 'Batches'], ['origins', 'Origins'], ['prefs', 'Settings']
+  ];
+  var BREW_SHORT = { filter: 'Filter', espresso: 'Espresso', kopisusu: 'Kopi susu', tubruk: 'Tubruk', flatwhite: 'Flat white', icedmilk: 'Iced milk', coldbrew: 'Cold brew', tonic: 'Tonic / orange' };
+  var REGION_LABEL = { SG: '🇸🇬 Singapore high-end', TH: '🇹🇭 Thailand high-end', ID: '🇮🇩 Indonesia high-end' };
+  function defaultSpecialty() { return { on: false, minScore: 84, arabicaOnly: true, robustaMax: 0, roastWindow: ['', ''], minBalance: 4, minComplexity: 3 }; }
+  function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
+
+  // ---------------- DOM helpers ----------------
+  function el(tag, props) {
+    var node = document.createElement(tag), kids = Array.prototype.slice.call(arguments, 2), val;
+    if (props) Object.keys(props).forEach(function (k) {
+      var v = props[k];
+      if (v == null || v === false) return;
+      if (k === 'class') node.className = v;
+      else if (k === 'text') node.textContent = v;
+      else if (k.indexOf('on') === 0) node.addEventListener(k.slice(2), v);
+      else if (k === 'value') val = v;
+      else if (k === 'checked' || k === 'disabled' || k === 'selected') node[k] = !!v;
+      else node.setAttribute(k, v === true ? '' : v);
+    });
+    append(node, kids);
+    if (val !== undefined) node.value = val;
+    return node;
+  }
+  function append(node, kids) {
+    kids.forEach(function (c) {
+      if (c == null || c === false) return;
+      if (Array.isArray(c)) append(node, c);
+      else node.appendChild(typeof c === 'object' ? c : document.createTextNode(String(c)));
+    });
+  }
+  function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); return node; }
+  function byId(id) { return document.getElementById(id); }
+  function nf(v, dp) { return Number(v).toLocaleString('id-ID', { minimumFractionDigits: dp || 0, maximumFractionDigits: dp || 0 }); }
+  function fmtG(g, dp) { return nf(g, dp || 0) + ' g'; }
+  function fmtKg(g) { return g >= 1000 ? nf(g / 1000, g % 1000 ? 2 : 0) + ' kg' : fmtG(g); }
+  function bagLabel(g) { return g >= 1000 ? (g / 1000) + ' kg' : g + ' g'; }
+  function uid(p) { return (p || 'x') + Date.now().toString(36) + Math.random().toString(36).slice(2, 7); }
+  function dateStr(ts) { try { return new Date(ts).toLocaleDateString('id-ID', { day: 'numeric', month: 'short', year: 'numeric' }); } catch (e) { return ''; } }
+  function field(label, input, hint) { return el('label', { class: 'field' }, el('span', null, label), input, hint ? el('small', { class: 'muted' }, hint) : null); }
+  function opt(value, label, selected) { return el('option', { value: value, selected: selected }, label); }
+  var toastTimer;
+  function toast(msg, bad) {
+    var t = document.querySelector('.toast');
+    if (t) t.remove();
+    t = el('div', { class: 'toast' + (bad ? ' bad' : ''), role: 'status' }, msg);
+    document.body.appendChild(t);
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { t.remove(); }, 3600);
+  }
+  function lsGet(k) { try { return JSON.parse(localStorage.getItem(k)); } catch (e) { return null; } }
+  function lsSet(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); return true; } catch (e) { return false; } }
+  // Save a generated file: the claude.ai downloads capability when present, otherwise a normal browser download.
+  async function saveFile(filename, text) {
+    var claude = window.claude, dl = null;
+    try { dl = claude && claude.use ? await claude.use('downloads') : null; } catch (e) { dl = null; }
+    if (dl) {
+      try { await dl.save({ filename: filename, data: text }); return true; }
+      catch (e) { if (e && e.code === 'declined') return false; toast('Couldn\'t save the file.', true); return false; }
+    }
+    try {
+      var blob = new Blob([text], { type: /\.html$/.test(filename) ? 'text/html' : 'application/json' });
+      var url = URL.createObjectURL(blob), a = document.createElement('a');
+      a.href = url; a.download = filename; document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(function () { URL.revokeObjectURL(url); }, 2000);
+      return true;
+    } catch (e) { toast('Downloading files isn\'t available in this browser.', true); return false; }
+  }
+  function sameScores(a, b) { return !!a && !!b && ATTRS.every(function (k) { return Number(a[k]) === Number(b[k]); }); }
+
+  // ---------------- state ----------------
+  var state = {
+    mode: 'connecting', route: 'simulator',
+    beans: [], blends: [], batches: [], cuppings: [],
+    settings: { rules: {}, customNotes: {}, customOrigins: [], customPresets: [] },
+    confirm: null, beanForm: null, cupDraft: null, sample: null, aiHidden: false, mapper: null
+  };
+  function origins() { return BASE_ORIGINS.concat(state.settings.customOrigins || []); }
+  function originById(id) { var all = origins(); for (var i = 0; i < all.length; i++) if (all[i].id === id) return all[i]; return null; }
+  function mainProcess(o) { return o ? E.processOf(String(o.process || '').split(/[,;]/)[0]) : 'full'; }
+  function derived(originId, roast, process, varietal) { var o = originById(originId); return o ? E.scoresFor(o, roast, process || mainProcess(o), varietal && varietal !== 'unknown' ? varietal : null) : null; }
+  function procLabel(p) { return (E.PROCESSES[p] || E.PROCESSES.full).label; }
+  function beanProcess(b) { return b.process || mainProcess(originById(b.originId)); }
+
+  function quickRow(name, originId, roast, notes, process) {
+    var o = originById(originId) || BASE_ORIGINS[0];
+    var p = process || mainProcess(o);
+    return { key: uid('r'), kind: 'quick', beanId: '', name: name, originId: o.id, species: o.species, roast: roast, process: p, varietal: 'unknown', cupScore: '', notesText: notes, scores: E.scoresFor(o, roast, p), min: '', max: '' };
+  }
+  function savedRow(beanId) { return { key: uid('r'), kind: 'saved', beanId: beanId, min: '', max: '' }; }
+  function defaultSim() {
+    return {
+      rows: [
+        quickRow('Example: Gayo', 'id-gayo', 3, 'dark chocolate, brown sugar, spice, herbal'),
+        quickRow('Example: Kintamani', 'id-kintamani', 2, 'orange, lemon, brown sugar'),
+        quickRow('Example: Lampung robusta', 'id-lampung', 4, 'dark chocolate, earthy, peanut')
+      ],
+      brew: 'kopisusu',
+      ranges: { body: ['4', '5'], acidity: ['', '3'], sweetness: ['3', ''], bitterness: ['', '3.5'], roast: ['', ''] },
+      mustText: 'chocolate', notText: '',
+      result: null, sig: '', pcts: null, manual: false,
+      plan: { 250: 20, 500: 0, 1000: 5 }, cupping: null, saveName: '', busy: false,
+      mode: 'taste', useKey: '', pick: { source: 'mine', maxBeans: 3, roast: 3 },
+      acidType: '', specialty: defaultSpecialty()
+    };
+  }
+  var sim = lsGet('rd.sim.v2') || defaultSim();
+  sim.result = null; sim.busy = false; sim.cupping = null;
+  sim.mode = sim.mode || 'taste'; sim.useKey = sim.useKey || '';
+  sim.acidType = sim.acidType || ''; sim.specialty = Object.assign(defaultSpecialty(), sim.specialty || {});
+  sim.pick = sim.pick || { source: 'mine', maxBeans: 3, roast: 3 };
+  sim.rows.forEach(function (r) { if (r.kind === 'quick' && !r.process) r.process = mainProcess(originById(r.originId)); });
+  var pickRes = null, pickBusy = false;
+  function saveSimDraft() { lsSet('rd.sim.v2', Object.assign({}, sim, { result: null, cupping: null, busy: false })); }
+
+  function beanById(id) { for (var i = 0; i < state.beans.length; i++) if (state.beans[i].id === id) return state.beans[i]; return null; }
+  function rules() { return E.withRules(state.settings.rules); }
+  var idxCache = { key: null, index: null };
+  function noteIndex() {
+    var key = JSON.stringify(state.settings.customNotes || {});
+    if (idxCache.key !== key) { idxCache.key = key; idxCache.index = E.buildIndex(LEX, state.settings.customNotes || {}); }
+    return idxCache.index;
+  }
+  function parse(text) { return E.parseNotes(text, noteIndex()); }
+  function savedBean(b) {
+    return { id: b.id, name: b.name, species: b.species, roast: b.roast, process: beanProcess(b), varietal: b.varietal || 'unknown', producer: b.producer || '', altitude: b.altitude || '', originId: b.originId,
+      cupScore: b.cupScore, scores: b.scores, calib: b.calib, noteCalib: b.noteCalib, notes: parse(b.bagNotes).known, bagNotes: b.bagNotes, stockG: b.stockG };
+  }
+
+  // ---------------- store (artifact db, or in-memory) ----------------
+  var db = null;
+  var COLS = ['beans', 'blends', 'batches', 'cuppings'];
+  function sortByDate(list) { return list.sort(function (a, b) { return (b.createdAt || 0) - (a.createdAt || 0); }); }
+  async function initStore() {
+    var claude = window.claude;
+    try { db = claude && claude.use ? await claude.use('db') : null; } catch (e) { db = null; }
+    try { state.sample = claude && claude.use ? await claude.use('sample') : null; } catch (e) { state.sample = null; }
+    if (!db) {
+      // Outside claude.ai (e.g. GitHub Pages): keep data in this browser, or only in memory if storage is blocked.
+      state.mode = lsSet('rd.store.test', 1) ? 'local' : 'memory';
+      if (state.mode === 'local') localLoad();
+      pruneMissingBeans(); render(); return;
+    }
+    state.mode = 'db';
+    var pending = COLS.length + 1;
+    var timer = setTimeout(function () { if (pending > 0) { state.mode = 'slow'; render(); } }, 10000);
+    function done() { pending--; if (pending <= 0) { clearTimeout(timer); if (state.mode === 'slow') state.mode = 'db'; } }
+    COLS.forEach(function (c) {
+      var first = true;
+      db.collection(c).onSnapshot(function (snap) {
+        state[c] = sortByDate(snap.docs.map(function (d) { return Object.assign({ id: d.id }, d.data()); }));
+        if (first && !snap.metadata.fromCache) { first = false; done(); if (c === 'beans') pruneMissingBeans(); }
+        scheduleRender();
+      }, function (err) { done(); toast('Couldn\'t load ' + c + ': ' + (err && err.code || 'error'), true); });
+    });
+    var firstS = true;
+    db.doc('settings/main').onSnapshot(function (snap) {
+      var d = snap.exists ? snap.data() : {};
+      state.settings = { rules: Object.assign({}, d.rules || {}), customNotes: Object.assign({}, d.customNotes || {}), customOrigins: (d.customOrigins || []).slice(), customPresets: (d.customPresets || []).slice() };
+      if (firstS && !snap.metadata.fromCache) { firstS = false; done(); }
+      scheduleRender();
+    }, function () { done(); });
+  }
+  var LOCAL_KEY = 'rd.store.v1';
+  function localLoad() {
+    var d = lsGet(LOCAL_KEY);
+    if (!d || typeof d !== 'object') return;
+    COLS.forEach(function (c) { state[c] = sortByDate(Array.isArray(d[c]) ? d[c].filter(function (x) { return x && typeof x.id === 'string'; }) : []); });
+    var s = d.settings || {};
+    state.settings = { rules: Object.assign({}, s.rules || {}), customNotes: Object.assign({}, s.customNotes || {}), customOrigins: (s.customOrigins || []).slice(), customPresets: (s.customPresets || []).slice() };
+  }
+  function localSave() {
+    if (state.mode !== 'local') return;
+    var ok = lsSet(LOCAL_KEY, { beans: state.beans, blends: state.blends, batches: state.batches, cuppings: state.cuppings, settings: state.settings, savedAt: Date.now() });
+    if (!ok) { state.mode = 'memory'; toast('This browser is out of space or blocks saving. Download a backup now so you don\'t lose your data.', true); }
+  }
+  // A remembered simulator draft can point at beans that no longer exist (deleted, or on another device).
+  function pruneMissingBeans() {
+    var before = sim.rows.length;
+    sim.rows = sim.rows.filter(function (r) { return r.kind !== 'saved' || beanById(r.beanId); });
+    if (sim.rows.length !== before) {
+      if (!sim.rows.length) sim.rows = defaultSim().rows;
+      sim.result = null; sim.pcts = null; saveSimDraft();
+      setTimeout(function () { if (!sim.result && simReady()) runSolve(); }, 30);
+    }
+  }
+  function writeError(e) {
+    var code = e && e.code;
+    var msg = code === 'quota_exceeded' ? 'Storage is full. Delete old batches or cupping entries, then try again.'
+      : code === 'invalid_argument' ? 'Only the owner or an editor can save changes here.'
+      : code === 'revoked' ? 'Access to saving was withdrawn. Reload the page.'
+      : 'Couldn\'t save. Check your connection and try again.';
+    toast(msg, true);
+    throw e;
+  }
+  async function putDoc(col, id, data) {
+    if (db) { try { await db.collection(col).doc(id).set(data); } catch (e) { writeError(e); } return; }
+    var list = state[col].filter(function (x) { return x.id !== id; });
+    list.push(Object.assign({ id: id }, data));
+    state[col] = sortByDate(list); localSave(); scheduleRender();
+  }
+  async function patchDoc(col, id, patch) {
+    if (db) { try { await db.collection(col).doc(id).update(patch); } catch (e) { writeError(e); } return; }
+    state[col] = state[col].map(function (x) { return x.id === id ? Object.assign({}, x, patch) : x; }); localSave(); scheduleRender();
+  }
+  async function delDoc(col, id) {
+    if (db) { try { await db.collection(col).doc(id).delete(); } catch (e) { writeError(e); } return; }
+    state[col] = state[col].filter(function (x) { return x.id !== id; }); localSave(); scheduleRender();
+  }
+  async function saveSettings(patch) {
+    var next = Object.assign({}, state.settings, patch);
+    var data = { rules: next.rules || {}, customNotes: next.customNotes || {}, customOrigins: next.customOrigins || [], customPresets: next.customPresets || [] };
+    if (db) { try { await db.doc('settings/main').set(data); } catch (e) { writeError(e); } return; }
+    state.settings = data; localSave(); scheduleRender();
+  }
+  function strip(doc) { var o = Object.assign({}, doc); delete o.id; return o; }
+
+  // ---------------- rendering ----------------
+  var renderQueued = false;
+  // rAF pauses in background tabs, so a timer backs it up: data changes always reach the screen.
+  function scheduleRender() {
+    if (renderQueued) return;
+    renderQueued = true;
+    var done = false;
+    function run() { if (done) return; done = true; renderQueued = false; render(); }
+    requestAnimationFrame(run);
+    setTimeout(run, 80);
+  }
+  function routeFromHash() {
+    var h = (location.hash || '').replace('#', '');
+    return ROUTES.some(function (r) { return r[0] === h; }) ? h : 'simulator';
+  }
+  function go(route) { if (location.hash !== '#' + route) location.hash = route; else render(); }
+  window.addEventListener('hashchange', function () { state.route = routeFromHash(); render(); window.scrollTo(0, 0); });
+
+  function renderTabs() {
+    var nav = clear(byId('tabs'));
+    var counts = { beans: state.beans.length, cupping: state.cuppings.length, blends: state.blends.length, batches: state.batches.length };
+    ROUTES.forEach(function (r) {
+      nav.appendChild(el('a', { class: 'tab', href: '#' + r[0], 'aria-current': state.route === r[0] ? 'page' : null },
+        r[1], counts[r[0]] ? el('span', { class: 'count' }, counts[r[0]]) : null));
+    });
+  }
+  function banner() {
+    if (state.mode === 'memory') return el('div', { class: 'banner' }, 'This browser isn\'t letting the page save (private window or blocked site data). Anything you add is lost when you close it. Use a normal window, or download a backup under Settings before you leave.');
+    if (state.mode === 'local') return el('p', { class: 'muted small', style: 'margin:0 0 12px' }, 'Saved in this browser on this device. To use your data on another device, download a backup under Settings and restore it there.');
+    if (state.mode === 'slow') return el('div', { class: 'banner' }, 'Your saved beans can\'t be reached yet. What you see may be out of date. It will update by itself once the connection is back.');
+    return null;
+  }
+  function render() {
+    state.route = routeFromHash();
+    renderTabs();
+    var main = byId('main');
+    var active = document.activeElement, aid = active && active.id, selS = null, selE = null;
+    try { if (aid && active.selectionStart != null) { selS = active.selectionStart; selE = active.selectionEnd; } } catch (e) { /* not a text input */ }
+    clear(main);
+    var b = banner(); if (b) main.appendChild(b);
+    if (state.mapper) main.appendChild(mapperCard());
+    var view = { simulator: viewSimulator, beans: viewBeans, cupping: viewCupping, blends: viewBlends, sheet: viewSheet, batches: viewBatches, origins: viewOrigins, prefs: viewPrefs }[state.route];
+    main.appendChild(view());
+    if (aid) {
+      var again = byId(aid);
+      if (again) { again.focus({ preventScroll: true }); try { if (selS != null) again.setSelectionRange(selS, selE); } catch (e) { /* ignore */ } }
+    }
+  }
+
+  // ---------------- shared bits ----------------
+  function noteChips(text, opts) {
+    opts = opts || {};
+    var p = parse(text), nc = opts.noteCalib || {};
+    var kids = p.known.map(function (n) {
+      return el('span', { class: 'chip' + (n.defect ? ' defect' : ''), title: LEX.families[n.family].label + ' · ' + n.intensity + (nc[n.key] ? ' · learned from cupping' : '') },
+        n.label, nc[n.key] ? el('i', null, '×' + nf(nc[n.key], 2)) : null);
+    });
+    p.unknown.forEach(function (u) {
+      kids.push(el('button', { type: 'button', class: 'chip unknown', title: 'Not recognised. Tap to tell the tool what it is.', onclick: function () { openMapper(u); } }, u + ' ?'));
+    });
+    if (opts.showIgnored) p.ignored.forEach(function (w) { kids.push(el('span', { class: 'chip ignored', title: 'Texture or quality word, not a flavour' }, w)); });
+    return kids.length ? el('div', { class: 'chips' }, kids) : null;
+  }
+  function originSelect(id, value, onchange, allowNone) {
+    var byCountry = {};
+    origins().forEach(function (o) { (byCountry[o.country] = byCountry[o.country] || []).push(o); });
+    var countries = Object.keys(byCountry).sort(function (a, b) { return a === 'Indonesia' ? -1 : b === 'Indonesia' ? 1 : a.localeCompare(b); });
+    return el('select', { id: id, value: value || '', onchange: onchange },
+      allowNone ? opt('', 'No origin (custom)') : null,
+      countries.map(function (c) {
+        return el('optgroup', { label: c }, byCountry[c].map(function (o) { return opt(o.id, o.region + ' · ' + o.species, o.id === value); }));
+      }));
+  }
+  function processSelect(id, value, onchange) {
+    return el('select', { id: id, value: value, onchange: onchange }, PROCS.map(function (p) { return opt(p, procLabel(p)); }));
+  }
+  function roastSelect(id, value, onchange) {
+    return el('select', { id: id, value: String(value), onchange: onchange }, [1, 2, 3, 4, 5].map(function (r) { var c = E.ROAST_COLOURS[r]; return opt(String(r), r + ' · ' + c.name + ' (Agtron ' + c.agtron + ')'); }));
+  }
+  function varietalSelect(id, value, onchange) {
+    return el('select', { id: id, value: value || 'unknown', onchange: onchange }, Object.keys(E.VARIETALS).map(function (k) { return opt(k, E.VARIETALS[k].label); }));
+  }
+  function speciesBadge(s) { return el('span', { class: 'badge ' + s }, s); }
+  function procBadge(p) { return el('span', { class: 'badge proc' }, (E.PROCESSES[p] || E.PROCESSES.full).short); }
+  function scoreLine(scores, calib) {
+    return el('span', { class: 'scorebar' }, ATTRS.map(function (a) {
+      var base = scores && scores[a] != null ? scores[a] : 3, c = calib && calib[a] ? calib[a] : 0;
+      return el('span', null, AL[a].slice(0, 4) + ' ', el('b', null, nf(Math.min(5, Math.max(1, base + c)), 1)),
+        c ? el('span', { class: c > 0 ? 'delta-pos' : 'delta-neg', title: 'Adjusted by cupping' }, ' ' + (c > 0 ? '+' : '') + nf(c, 2)) : null);
+    }));
+  }
+  function openMapper(word) {
+    state.mapper = { word: word, family: 'fruity', intensity: 'medium', suggestion: null, busy: false };
+    render();
+    window.scrollTo(0, 0);
+  }
+
+  // ---------------- simulator: data ----------------
+  function simBeans() {
+    return sim.rows.map(function (row, i) {
+      if (row.kind === 'saved') { var b = beanById(row.beanId); return b ? savedBean(b) : null; }
+      return { id: null, quick: true, name: row.name || 'Quick bean ' + (i + 1), species: row.species, roast: row.roast, process: row.process, varietal: row.varietal || 'unknown', originId: row.originId,
+        cupScore: row.cupScore === '' ? null : row.cupScore, scores: row.scores, notes: parse(row.notesText).known, bagNotes: row.notesText, stockG: null };
+    });
+  }
+  function rangesFrom(src) {
+    var ranges = {};
+    TATTRS.forEach(function (a) { var r = (src || {})[a] || ['', '']; ranges[a] = [r[0] === '' || r[0] == null ? null : Number(r[0]), r[1] === '' || r[1] == null ? null : Number(r[1])]; });
+    return ranges;
+  }
+  function simTarget() {
+    var must = E.splitTerms(sim.mustText);
+    if (sim.acidType) must.push('acid:' + sim.acidType);
+    return { ranges: rangesFrom(sim.ranges), must: must, mustNot: E.splitTerms(sim.notText), specialty: sim.specialty && sim.specialty.on ? sim.specialty : null };
+  }
+  function simLimits() { return sim.rows.map(function (r) { return { min: r.min === '' ? null : Number(r.min), max: r.max === '' ? null : Number(r.max) }; }); }
+  function simBounds() {
+    var R = rules(), n = sim.rows.length, lim = simLimits();
+    return {
+      mins: lim.map(function (l) { return n > 1 ? Math.max(R.minPct, l.min || 0) : 100; }),
+      maxs: lim.map(function (l) { return l.max != null && isFinite(l.max) ? l.max : 100; })
+    };
+  }
+  function solveOpts() {
+    var useIdx = -1;
+    sim.rows.forEach(function (r, i) { if (r.key === sim.useKey) useIdx = i; });
+    var mode = sim.mode === 'useup' && useIdx < 0 ? 'taste' : sim.mode;
+    return { brew: sim.brew, rules: rules(), index: noteIndex(), limits: simLimits(), mode: mode, useIdx: useIdx, bagG: 250 };
+  }
+  function simSig() {
+    return JSON.stringify([sim.rows.map(function (r) { var b = r.kind === 'saved' ? beanById(r.beanId) : null; return [r, b && [b.scores, b.calib, b.noteCalib, b.bagNotes, b.roast, b.species, b.process]]; }),
+      sim.brew, sim.ranges, sim.mustText, sim.notText, sim.mode, sim.useKey, sim.acidType, sim.specialty, state.settings]);
+  }
+  function simReady() { return sim.rows.length > 0 && simBeans().every(Boolean); }
+  function currentEval() {
+    if (!sim.pcts || sim.pcts.length !== sim.rows.length || !simReady()) return null;
+    return E.evaluateMix(simBeans(), sim.pcts, simTarget(), solveOpts());
+  }
+  function runSolve() {
+    if (!simReady()) { toast('Pick a bean for every row first.', true); return; }
+    sim.busy = true; render();
+    setTimeout(function () {
+      var res = E.solve(simBeans(), simTarget(), solveOpts());
+      sim.result = res; sim.sig = simSig(); sim.busy = false; sim.manual = false; sim.cupping = null;
+      sim.pcts = res.best ? res.best.pcts.slice() : null;
+      saveSimDraft(); render();
+    }, 30);
+  }
+  function simChanged(full) { saveSimDraft(); if (full) render(); else refreshResults(); }
+  function clearMix() { sim.pcts = null; sim.result = null; }
+
+  // ---------------- simulator: view ----------------
+  function viewSimulator() {
+    return el('div', { class: 'sim' },
+      el('div', { class: 'stack' }, targetCard(), mixCard(), pickerCard()),
+      el('div', { class: 'stack', id: 'results' }, resultsContent()));
+  }
+  function refreshResults() { var r = byId('results'); if (r) { clear(r); append(r, [resultsContent()]); } }
+
+  function applyPreset(id) {
+    var p = E.PRESETS.concat(state.settings.customPresets || []).filter(function (x) { return x.id === id; })[0];
+    if (!p) return;
+    sim.brew = p.brew; sim.mustText = p.must || ''; sim.notText = p.mustNot || ''; sim.acidType = p.acidType || '';
+    sim.specialty = p.specialty ? Object.assign(defaultSpecialty(), JSON.parse(JSON.stringify(p.specialty))) : Object.assign(defaultSpecialty(), { on: false });
+    sim.ranges = {};
+    TATTRS.forEach(function (a) { var r = (p.ranges || {})[a] || ['', '']; sim.ranges[a] = [String(r[0] == null ? '' : r[0]), String(r[1] == null ? '' : r[1])]; });
+    pickRes = null;
+    simChanged(true);
+    toast('Loaded "' + p.name + '". Press Decide ratio, or let it pick the beans.');
+  }
+  function rangeSelect(id, value, onchange) {
+    var vals = ['', '1', '1.5', '2', '2.5', '3', '3.5', '4', '4.5', '5'];
+    return el('select', { id: id, value: value, onchange: onchange, style: 'width:auto' }, vals.map(function (v) { return opt(v, v === '' ? 'any' : v.replace('.', ',')); }));
+  }
+  function targetCard() {
+    var R = rules(), idx = noteIndex();
+    var mine = state.settings.customPresets || [];
+    var brewSeg = el('div', { class: 'seg', role: 'radiogroup', 'aria-label': 'Brew style' }, Object.keys(E.BREWS).map(function (k) {
+      return el('label', { title: E.BREWS[k].label }, el('input', { type: 'radio', name: 'brew', id: 'brew-' + k, value: k, checked: sim.brew === k, onchange: function () { sim.brew = k; simChanged(true); } }), el('span', null, BREW_SHORT[k] || k));
+    }));
+    var sp = sim.specialty;
+    function spNum(id, key, attrs) {
+      return el('input', Object.assign({ type: 'number', id: id, value: sp[key], oninput: function (e) { sp[key] = e.target.value === '' ? '' : Number(e.target.value); simChanged(false); } }, attrs || {}));
+    }
+    var gate = el('details', { class: 'gate', open: sp.on ? true : null },
+      el('summary', null, el('label', { class: 'row tight', onclick: function (e) { e.stopPropagation(); } },
+        el('input', { type: 'checkbox', id: 'sp-on', checked: sp.on, onchange: function (e) { sp.on = e.target.checked; simChanged(true); } }),
+        el('b', null, 'High-end specialty check'))),
+      el('div', { class: 'stack', style: 'gap:8px;margin-top:8px' },
+        el('p', { class: 'muted small' }, 'For specialty cafés: the estimated cup score (from your beans\' cup scores) must reach the target, the cup must be clean, roast colour must fit, and balance and complexity must be high enough.'),
+        el('div', { class: 'grid4' },
+          field('Min cup score', spNum('sp-score', 'minScore', { min: 70, max: 95, step: 0.5 })),
+          field('Robusta max %', spNum('sp-rob', 'robustaMax', { min: 0, max: 100 })),
+          field('Min balance', spNum('sp-bal', 'minBalance', { min: 1, max: 5, step: 0.5 })),
+          field('Min complexity', spNum('sp-cx', 'minComplexity', { min: 1, max: 5, step: 0.5 }))),
+        el('div', { class: 'grid2' },
+          el('label', { class: 'row tight small' }, el('input', { type: 'checkbox', id: 'sp-ara', checked: sp.arabicaOnly, onchange: function (e) { sp.arabicaOnly = e.target.checked; simChanged(true); } }), 'Arabica only'),
+          el('div', { class: 'row tight small' }, el('span', { class: 'muted' }, 'Roast colour'),
+            rangeSelect('sp-rlo', String((sp.roastWindow || [])[0] || ''), function (e) { sp.roastWindow = [e.target.value, (sp.roastWindow || [])[1] || '']; simChanged(true); }), '–',
+            rangeSelect('sp-rhi', String((sp.roastWindow || [])[1] || ''), function (e) { sp.roastWindow = [(sp.roastWindow || [])[0] || '', e.target.value]; simChanged(true); })))));
+    function termChips(text) {
+      var terms = E.splitTerms(text);
+      if (!terms.length) return null;
+      return el('div', { class: 'chips' }, terms.map(function (t) {
+        var r = E.resolveTerm(t, idx);
+        return r ? el('span', { class: 'chip', title: r.kind === 'note' ? 'Single note' : r.kind === 'sub' ? 'Note group' : 'Flavour wheel family' }, r.label, el('i', null, r.kind === 'note' ? 'note' : r.kind === 'sub' ? 'group' : 'family'))
+          : el('span', { class: 'chip unknown' }, t + ' ?');
+      }));
+    }
+    var useOpts = sim.rows.map(function (r, i) { var b = r.kind === 'saved' ? beanById(r.beanId) : null; return opt(r.key, (b ? b.name : r.name) || 'Bean ' + (i + 1)); });
+    return el('section', { class: 'card', 'aria-labelledby': 'tgt-h' },
+      el('h2', { id: 'tgt-h' }, 'The cup you want'),
+      el('div', { class: 'row' },
+        el('div', { style: 'flex:1;min-width:200px' }, field('Start from a style', el('select', { id: 'preset', value: '', onchange: function (e) { applyPreset(e.target.value); } },
+          opt('', 'Choose a style…'),
+          ['SG', 'TH', 'ID'].map(function (rg) { return el('optgroup', { label: REGION_LABEL[rg] }, E.PRESETS.filter(function (p) { return p.region === rg; }).map(function (p) { return opt(p.id, p.name.replace(/^[A-Za-z]+: /, '')); })); }),
+          el('optgroup', { label: 'Indonesian everyday styles' }, E.PRESETS.filter(function (p) { return !p.region; }).map(function (p) { return opt(p.id, p.name); })),
+          mine.length ? el('optgroup', { label: 'My styles' }, mine.map(function (p) { return opt(p.id, p.name); })) : null)))),
+      el('div', { class: 'stack', style: 'gap:6px' }, el('span', { class: 'label' }, 'Served as'), brewSeg,
+        el('span', { class: 'muted small' }, 'Robusta limit for this style: ' + R.robustaCap[sim.brew] + '%')),
+      el('div', { class: 'tablewrap' }, el('table', null,
+        el('thead', null, el('tr', null, el('th', null, 'As served'), el('th', null, 'From'), el('th', null, 'To'))),
+        el('tbody', null, TATTRS.map(function (a) {
+          var r = sim.ranges[a] || ['', ''];
+          return el('tr', null, el('td', null, AL[a]),
+            el('td', null, rangeSelect('rg-lo-' + a, r[0], function (e) { sim.ranges[a] = [e.target.value, (sim.ranges[a] || ['', ''])[1]]; simChanged(true); })),
+            el('td', null, rangeSelect('rg-hi-' + a, r[1], function (e) { sim.ranges[a] = [(sim.ranges[a] || ['', ''])[0], e.target.value]; simChanged(true); })));
+        })))),
+      field('Must taste', el('input', { type: 'text', id: 'must', value: sim.mustText, placeholder: 'e.g. chocolate, citrus', oninput: function (e) { sim.mustText = e.target.value; simChanged(false); }, onchange: function () { render(); } }), 'Reaches at least Supporting in the cup. Name a note, a group (citrus, berry, chocolate) or a wheel family.'),
+      termChips(sim.mustText),
+      field('Must not taste', el('input', { type: 'text', id: 'mustnot', value: sim.notText, placeholder: 'e.g. earthy', oninput: function (e) { sim.notText = e.target.value; simChanged(false); }, onchange: function () { render(); } }), 'Stays at Faint or below.'),
+      termChips(sim.notText),
+      field('Acidity character wanted', el('select', { id: 'acidtype', value: sim.acidType, onchange: function (e) { sim.acidType = e.target.value; simChanged(true); } },
+        opt('', 'Any'), Object.keys(E.ACID_TYPES).filter(function (k) { return k !== 'acetic'; }).map(function (k) { return opt(k, E.ACID_TYPES[k].label); })),
+        'Must reach at least Supporting. Comes from notes like lemon (citric), apple and peach (malic), blackcurrant (phosphoric) or grape and wine (tartaric).'),
+      gate,
+      el('div', { class: 'grid2' },
+        field('When several mixes fit', el('select', { id: 'mode', value: sim.mode, onchange: function (e) { sim.mode = e.target.value; if (sim.mode === 'useup' && !sim.useKey && sim.rows[0]) sim.useKey = sim.rows[0].key; simChanged(true); } },
+          opt('taste', 'Choose the best-balanced cup'), opt('stock', 'Make the most 250 g bags from stock'), opt('useup', 'Use up as much as possible of…'))),
+        sim.mode === 'useup' ? field('Bean to use up', el('select', { id: 'useup', value: sim.useKey, onchange: function (e) { sim.useKey = e.target.value; simChanged(true); } }, useOpts)) : el('span')),
+      el('div', { class: 'row' },
+        el('button', { class: 'btn primary big', type: 'button', disabled: sim.busy, onclick: runSolve }, sim.busy ? 'Deciding…' : 'Decide ratio'),
+        el('span', { class: 'spacer' }),
+        el('input', { type: 'text', id: 'preset-name', placeholder: 'Name this style', value: state.presetName || '', style: 'width:150px', oninput: function (e) { state.presetName = e.target.value; } }),
+        el('button', { class: 'btn ghost', type: 'button', onclick: async function () {
+          var name = (state.presetName || '').trim();
+          if (!name) { toast('Type a name for the style first.', true); return; }
+          var p = { id: uid('p'), name: name, brew: sim.brew, ranges: JSON.parse(JSON.stringify(sim.ranges)), must: sim.mustText, mustNot: sim.notText, acidType: sim.acidType,
+            specialty: sim.specialty.on ? JSON.parse(JSON.stringify(sim.specialty)) : null };
+          try { await saveSettings({ customPresets: (state.settings.customPresets || []).concat([p]) }); state.presetName = ''; toast('Saved style "' + name + '".'); } catch (e) { /* shown */ }
+        } }, 'Save as my style')));
+  }
+
+  function mixCard() {
+    var rows = sim.rows.map(function (row, i) { return beanRowEditor(row, i); });
+    return el('section', { class: 'card', 'aria-labelledby': 'mix-h' },
+      el('div', { class: 'row' }, el('h2', { id: 'mix-h' }, 'Beans in the mix'), el('span', { class: 'spacer' }), el('span', { class: 'muted small mono' }, sim.rows.length + ' of 5')),
+      rows.length ? rows : el('div', { class: 'empty' }, el('p', null, 'Add 2–5 beans, or let the simulator pick them for you below.')),
+      el('div', { class: 'row' },
+        el('button', { class: 'btn', type: 'button', disabled: sim.rows.length >= 5, onclick: function () {
+          var saved = state.beans.filter(function (b) { return !sim.rows.some(function (r) { return r.beanId === b.id; }); })[0];
+          sim.rows.push(saved ? savedRow(saved.id) : quickRow('', 'id-gayo', 3, ''));
+          clearMix(); simChanged(true);
+        } }, '+ Add bean'),
+        sim.rows.some(function (r) { return /^Example/.test(r.name || ''); }) ? el('span', { class: 'muted small' }, 'Examples are loaded so you can see how it works. Replace them with your own beans.') : null));
+  }
+  function beanRowEditor(row, i) {
+    var color = BEAN_COLORS[i];
+    var src = el('select', { id: 'row-src-' + row.key, onchange: function (e) {
+      var v = e.target.value;
+      if (v === '__quick') { var q = quickRow('', row.originId || 'id-gayo', 3, ''); q.key = row.key; Object.assign(row, q); }
+      else { row.kind = 'saved'; row.beanId = v; }
+      clearMix(); simChanged(true);
+    } },
+      opt('__quick', 'Quick bean (not saved)', row.kind === 'quick'),
+      state.beans.length ? el('optgroup', { label: 'My beans' }, state.beans.map(function (b) { return opt(b.id, b.name + ' · ' + b.species, row.kind === 'saved' && row.beanId === b.id); })) : null);
+    var body;
+    if (row.kind === 'saved') {
+      var b = beanById(row.beanId);
+      if (!b) body = el('p', { class: 'muted small' }, state.mode === 'connecting' ? 'Loading…' : 'This bean was deleted. Pick another.');
+      else {
+        var o = originById(b.originId);
+        body = el('div', { class: 'stack', style: 'gap:6px' },
+          el('div', { class: 'row tight small' }, speciesBadge(b.species), procBadge(beanProcess(b)), el('span', { class: 'muted' }, (o ? o.region : 'Custom origin') + ' · ' + E.roastColour(b.roast).name.toLowerCase() + ' roast' + (b.cupScore ? ' · cup ' + nf(b.cupScore, 2) : ' · no cup score') + ' · stock ' + fmtKg(b.stockG || 0))),
+          noteChips(b.bagNotes, { noteCalib: b.noteCalib }), scoreLine(b.scores, b.calib));
+      }
+    } else {
+      var rederive = function (prev) {
+        var before = derived(prev.originId, prev.roast, prev.process, prev.varietal);
+        if (!before || sameScores(row.scores, before)) row.scores = derived(row.originId, row.roast, row.process, row.varietal) || row.scores;
+      };
+      var snap = function () { return { originId: row.originId, roast: row.roast, process: row.process, varietal: row.varietal }; };
+      body = el('div', { class: 'stack', style: 'gap:8px' },
+        el('div', { class: 'grid2' },
+          field('Name', el('input', { type: 'text', id: 'row-name-' + row.key, value: row.name, placeholder: 'e.g. Toraja from Roastery X', oninput: function (e) { row.name = e.target.value; simChanged(false); } })),
+          field('Origin', originSelect('row-origin-' + row.key, row.originId, function (e) {
+            var prev = snap(), prevO = originById(row.originId), o = originById(e.target.value);
+            row.originId = e.target.value;
+            if (o) {
+              row.species = o.species; row.process = mainProcess(o); rederive(prev);
+              if (!row.notesText || (prevO && row.notesText === prevO.notes)) row.notesText = o.notes;
+            }
+            clearMix(); simChanged(true);
+          }))),
+        el('div', { class: 'grid4' },
+          field('Species', el('select', { id: 'row-sp-' + row.key, value: row.species, onchange: function (e) { row.species = e.target.value; simChanged(true); } }, SPECIES.map(function (s) { return opt(s, s); }))),
+          field('Process', processSelect('row-proc-' + row.key, row.process, function (e) { var prev = snap(); row.process = e.target.value; rederive(prev); simChanged(true); })),
+          field('Varietal', varietalSelect('row-var-' + row.key, row.varietal, function (e) { var prev = snap(); row.varietal = e.target.value; rederive(prev); simChanged(true); })),
+          field('Roast colour', roastSelect('row-roast-' + row.key, row.roast, function (e) { var prev = snap(); row.roast = Number(e.target.value); rederive(prev); simChanged(true); }))),
+        field('Cup score (optional, 0–100)', el('input', { type: 'number', id: 'row-cs-' + row.key, min: 0, max: 100, step: 0.25, value: row.cupScore == null ? '' : row.cupScore, placeholder: 'e.g. 85', oninput: function (e) { row.cupScore = e.target.value === '' ? '' : Number(e.target.value); simChanged(false); } }), 'From the roastery\'s spec sheet or your own cupping. Needed for the high-end score check.'),
+        field('Notes on the bag', el('input', { type: 'text', id: 'row-notes-' + row.key, value: row.notesText, placeholder: 'e.g. dark chocolate, gula aren, orange', oninput: function (e) { row.notesText = e.target.value; simChanged(false); }, onchange: function () { render(); } })),
+        noteChips(row.notesText, { showIgnored: true }),
+        el('details', null, el('summary', { class: 'small' }, 'Taste scores (1–5)'),
+          el('div', { class: 'grid4', style: 'margin-top:8px' }, ATTRS.map(function (a) {
+            return field(AL[a], el('input', { type: 'number', id: 'row-sc-' + a + '-' + row.key, min: 1, max: 5, step: 0.5, value: row.scores[a], oninput: function (e) { var v = Number(e.target.value); if (v >= 1 && v <= 5) { row.scores[a] = v; simChanged(false); } } }));
+          }))));
+    }
+    return el('div', { class: 'beanrow', style: 'border-left-color:' + color },
+      el('div', { class: 'row tight' }, el('span', { class: 'dot', style: 'background:' + color }), el('div', { style: 'flex:1;min-width:0' }, src),
+        el('button', { class: 'btn ghost', type: 'button', 'aria-label': 'Remove bean', onclick: function () { sim.rows.splice(i, 1); clearMix(); simChanged(true); } }, 'Remove')),
+      body,
+      el('div', { class: 'row tight small' }, el('span', { class: 'muted' }, 'Share limits'),
+        el('input', { type: 'number', id: 'row-min-' + row.key, min: 0, max: 100, placeholder: 'min %', value: row.min, style: 'width:90px', oninput: function (e) { row.min = e.target.value; simChanged(false); } }),
+        el('input', { type: 'number', id: 'row-max-' + row.key, min: 0, max: 100, placeholder: 'max %', value: row.max, style: 'width:90px', oninput: function (e) { row.max = e.target.value; simChanged(false); } })));
+  }
+
+  // ---------------- bean picker ----------------
+  function pickCandidates() {
+    var P = sim.pick, idx = noteIndex(), out = [];
+    if (P.source !== 'catalogue') {
+      state.beans.filter(function (b) { return (b.stockG || 0) > 0; }).forEach(function (b) {
+        var sb = savedBean(b); sb.src = { kind: 'saved', beanId: b.id }; out.push(sb);
+      });
+    }
+    if (P.source !== 'mine') {
+      var roast = Number(P.roast) || 3;
+      origins().forEach(function (o) {
+        var procs = E.offeredProcesses(o.process);
+        (procs.length ? procs : [mainProcess(o)]).forEach(function (p) {
+          out.push({ id: null, quick: true, name: o.region + (procs.length > 1 ? ' · ' + E.PROCESSES[p].short.toLowerCase() : ''), species: o.species, roast: roast, process: p,
+            scores: E.scoresFor(o, roast, p), notes: E.parseNotes(o.notes, idx).known, stockG: null, originKey: o.id, src: { kind: 'origin', originId: o.id, roast: roast, process: p } });
+        });
+      });
+    }
+    return out;
+  }
+  function runPick() {
+    var cands = pickCandidates();
+    if (cands.length < 2) {
+      toast(sim.pick.source === 'mine' ? 'You need at least 2 saved beans with stock. Choose the origin catalogue, or add beans first.' : 'Not enough beans to pick from.', true);
+      return;
+    }
+    pickBusy = true; render();
+    setTimeout(function () {
+      pickRes = E.pickBeans(cands, simTarget(), { brew: sim.brew, rules: rules(), index: noteIndex(), maxBeans: Number(sim.pick.maxBeans) || 3, limit: 5 });
+      pickBusy = false; render();
+    }, 30);
+  }
+  function usePick(p) {
+    sim.rows = p.beans.map(function (b) {
+      if (b.src.kind === 'saved') return savedRow(b.src.beanId);
+      var o = originById(b.src.originId);
+      return quickRow(o.region, o.id, b.src.roast, o.notes, b.src.process);
+    });
+    sim.result = p.result; sim.pcts = p.result.best.pcts.slice(); sim.manual = false; sim.cupping = null;
+    sim.mode = 'taste'; sim.sig = simSig(); saveSimDraft(); render();
+    toast('Loaded the mix. Check the result on the right, or below on a phone.');
+  }
+  function pickerCard() {
+    var P = sim.pick;
+    return el('section', { class: 'card', 'aria-labelledby': 'pk-h' },
+      el('h2', { id: 'pk-h' }, 'Let it pick the beans'),
+      el('p', { class: 'muted small' }, 'It uses the cup you described above, tries every combination of 2 to ' + P.maxBeans + ' beans, and returns the best mixes with exact ratios.'),
+      el('div', { class: 'grid2' },
+        field('Pick from', el('select', { id: 'pk-src', value: P.source, onchange: function (e) { P.source = e.target.value; pickRes = null; simChanged(true); } },
+          opt('mine', 'My beans with stock'), opt('all', 'My beans and the origin catalogue'), opt('catalogue', 'Origin catalogue only'))),
+        field('Up to', el('select', { id: 'pk-max', value: String(P.maxBeans), onchange: function (e) { P.maxBeans = Number(e.target.value); pickRes = null; simChanged(true); } },
+          opt('2', '2 beans'), opt('3', '3 beans'), opt('4', '4 beans (slower)')))),
+      P.source !== 'mine' ? field('Catalogue beans roasted at', roastSelect('pk-roast', P.roast, function (e) { P.roast = Number(e.target.value); pickRes = null; simChanged(true); }), 'Catalogue origins are tried in each process they are known for (full wash, semi wash, natural).') : null,
+      el('button', { class: 'btn primary', type: 'button', disabled: pickBusy, onclick: runPick }, pickBusy ? 'Searching…' : 'Find the best beans'),
+      pickRes ? (pickRes.picks.length ? el('div', { class: 'list' },
+        el('p', { class: 'muted small mono' }, 'Compared ' + pickRes.considered + ' promising beans · ' + nf(pickRes.evals) + ' mixes · ' + nf(pickRes.ms) + ' ms'),
+        pickRes.picks.map(function (p, n) {
+          var best = p.result.best;
+          return el('div', { class: 'alt' },
+            el('div', { class: 'row' }, el('b', null, '#' + (n + 1)),
+              p.result.status === 'warn' && p.result.warnings.every(function (w) { return /^Add a cup score/.test(w); }) ? el('span', { class: 'pill ok', title: 'Fits the target. Add cup scores to confirm the high-end score.' }, '✓ Possible · needs cup scores') : statusPill(p.result.status, p.result.headline),
+              el('span', { class: 'spacer' }), el('span', { class: 'mono' }, best.pcts.join(' : '))),
+            el('div', { class: 'legend' }, p.beans.map(function (b, i) { return el('span', null, el('span', { class: 'dot', style: 'background:' + BEAN_COLORS[i] }), b.name, ' ', procBadge(b.process), ' ', el('b', { class: 'mono' }, best.pcts[i] + '%')); })),
+            el('p', { class: 'small' }, best.notes.summary),
+            el('p', { class: 'muted small' }, 'Balance ' + nf(best.form.balance, 1) + ' · ' + (best.robust === 1 ? 'holds within ±2% weighing error' : 'sensitive to weighing errors')),
+            el('button', { class: 'btn', type: 'button', onclick: function () { usePick(p); } }, 'Use this mix'));
+        })) : el('p', { class: 'small' }, 'No combination reached your target. Widen the ranges or pick from the origin catalogue.')) : null);
+  }
+
+  // ---------------- simulator: results ----------------
+  function resultsContent() {
+    if (sim.busy) return el('div', { class: 'empty' }, el('p', null, 'Trying every whole-percent mix…'));
+    if (!sim.result) {
+      if (!simReady()) return el('div', { class: 'empty' }, el('p', null, 'Pick your beans, describe the cup, then press Decide ratio.'));
+      return el('div', { class: 'empty' }, el('p', null, 'Ready. Press Decide ratio to test every whole-percent mix of these beans.'), el('button', { class: 'btn primary', type: 'button', onclick: runSolve }, 'Decide ratio'));
+    }
+    var res = sim.result, stale = sim.sig !== simSig(), ev = currentEval(), parts = [];
+    if (stale) parts.push(el('p', { class: 'stale' }, 'You changed the inputs. Press Decide ratio again to update the best mix.'));
+    if (!res.best || !ev) {
+      parts.push(el('div', { class: 'verdict fail' }, el('div', { class: 'row' }, el('span', { class: 'pill fail' }, '✕ Not possible')),
+        el('ul', { class: 'reasons' }, (res.reasons || []).map(function (r) { return el('li', null, r); }))));
+      return el('div', { class: 'stack' }, parts);
+    }
+    var beans = simBeans();
+    parts.push(verdictBlock(ev, beans, res));
+    parts.push(adjustBlock(beans));
+    parts.push(cupBlock(ev));
+    if ((res.alternatives || []).length && !sim.manual) parts.push(altsBlock(res.alternatives));
+    parts.push(recipeBlock(ev));
+    parts.push(cuppingBlock(res, beans));
+    parts.push(makeBlock(beans));
+    parts.push(saveBlock(ev));
+    var ai = aiBlock(ev, beans);
+    if (ai) parts.push(ai);
+    return el('div', { class: 'stack' }, parts);
+  }
+  function statusPill(status, headline) {
+    var icon = status === 'ok' ? '✓ ' : status === 'warn' ? '! ' : '✕ ';
+    return el('span', { class: 'pill ' + status }, icon + headline);
+  }
+  function ratioText(pcts) {
+    var kids = [];
+    pcts.forEach(function (p, i) { if (i) kids.push(el('span', { class: 'sep' }, ':')); kids.push(el('span', { style: 'color:' + BEAN_COLORS[i] }, p)); });
+    return el('div', { class: 'ratio-big', 'aria-label': 'Ratio ' + pcts.join(' to ') }, kids);
+  }
+  function ratioBar(pcts) {
+    return el('div', { class: 'ratiobar', role: 'img', 'aria-label': 'Ratio bar' }, pcts.map(function (p, i) { return el('div', { style: 'width:' + p + '%;background:' + BEAN_COLORS[i] }); }));
+  }
+  function legend(beans, pcts) {
+    return el('div', { class: 'legend' }, beans.map(function (b, i) { return el('span', null, el('span', { class: 'dot', style: 'background:' + BEAN_COLORS[i] }), b.name + ' ', el('b', { class: 'mono' }, pcts[i] + '%')); }));
+  }
+  function robustPill(r) {
+    if (r === 1) return el('span', { class: 'pill ok', title: 'Every ±2% weighing error keeps the verdict' }, '✓ Holds within ±2% weighing error');
+    if (r >= 0.5) return el('span', { class: 'pill warn', title: 'Some ±2% weighing errors change the verdict' }, 'Mostly holds within ±2%');
+    return el('span', { class: 'pill fail', title: 'Most ±2% weighing errors change the verdict' }, 'Sensitive: weigh carefully');
+  }
+  function qualityPills(ev) {
+    var out = [];
+    if (ev.predicted) {
+      var target = sim.specialty.on ? Number(sim.specialty.minScore) || 0 : 0;
+      out.push(el('span', { class: 'pill ' + (!target || ev.predicted.value >= target ? 'ok' : 'fail'), title: 'Estimate from your beans\' cup scores (weighted by share, minus clashes and defects). Not an official SCA score.' },
+        'Est. cup score ' + nf(ev.predicted.value, 1) + ' (' + nf(ev.predicted.low, 1) + '–' + nf(ev.predicted.high, 1) + ')'));
+    }
+    if (ev.specialty) out.push(el('span', { class: 'pill ' + (ev.status === 'fail' ? 'fail' : 'ok') }, ev.status === 'fail' ? '✕ High-end check' : '✓ High-end check'));
+    return out;
+  }
+  function recipeBlock(ev) {
+    var r = E.recipeFor(sim.brew, ev.values.roast), c = E.roastColour(ev.values.roast);
+    var rows = [['Dose', r.dose], ['Output', r.yield], ['Ratio', r.ratio], ['Water temp', r.temp], ['Time', r.time], ['Grind', r.grind]];
+    return el('section', { class: 'card', 'aria-labelledby': 'rc-h' },
+      el('div', { class: 'row' }, el('h3', { id: 'rc-h' }, 'Recipe card: ' + r.title), el('span', { class: 'spacer' }), el('span', { class: 'muted small' }, c.name + ' roast (Agtron ' + c.agtron + ')')),
+      el('div', { class: 'tablewrap' }, el('table', null, el('tbody', null, rows.map(function (x) { return el('tr', null, el('th', null, x[0]), el('td', { class: 'mono' }, x[1])); })))),
+      el('p', { class: 'small' }, r.extra),
+      el('p', { class: 'small mono' }, 'Targets: ' + r.targets),
+      el('details', null, el('summary', { class: 'small' }, 'Water and resting'), el('p', { class: 'small', style: 'margin-top:6px' }, r.water), el('p', { class: 'small' }, 'Best served ' + r.rest + '.')),
+      el('p', { class: 'muted small' }, 'Starting points based on SCA-style norms. Dial in on your own grinder and water.'),
+      el('button', { class: 'btn primary', type: 'button', onclick: function () { openSheetFromSim(ev); } }, 'Make a café spec sheet'));
+  }
+  function verdictBlock(ev, beans, res) {
+    var modeNote = sim.mode === 'stock' ? 'Tie-break: most bags from stock' : sim.mode === 'useup' ? 'Tie-break: use up the chosen bean' : null;
+    var round = !sim.manual && res.round ? res.round : null;
+    return el('section', { class: 'verdict ' + ev.status, 'aria-label': 'Verdict' },
+      el('div', { class: 'row' }, statusPill(ev.status, ev.headline), ev.status !== 'fail' ? robustPill(ev.robust) : null, qualityPills(ev), el('span', { class: 'spacer' }),
+        el('span', { class: 'muted small mono' }, sim.manual ? 'Your adjusted mix' : res.searched ? 'Best of ' + nf(res.searched) + ' mixes · ' + nf(res.ms) + ' ms' : 'From a saved blend or pick')),
+      ratioText(sim.pcts), ratioBar(sim.pcts), legend(beans, sim.pcts),
+      modeNote ? el('p', { class: 'muted small' }, modeNote) : null,
+      round ? el('div', { class: 'row small' }, el('span', null, 'Rounder option: ', el('b', { class: 'mono' }, round.pcts.join(' : ')), ', also ' + round.headline.toLowerCase() + '. Easier to weigh.'),
+        el('button', { class: 'btn ghost', type: 'button', onclick: function () { sim.pcts = round.pcts.slice(); sim.manual = true; simChanged(true); } }, 'Use ' + round.pcts.join(' : '))) : null,
+      ev.reasons.length ? el('ul', { class: 'reasons' }, ev.reasons.map(function (r) { return el('li', null, r); })) : null,
+      ev.warnings.length ? el('ul', { class: 'reasons muted small' }, ev.warnings.map(function (r) { return el('li', null, r); })) : null,
+      ev.unresolved.length ? el('p', { class: 'muted small' }, 'Not recognised in your target: ' + ev.unresolved.join(', ') + '.') : null,
+      ev.status === 'fail' && !sim.manual ? el('p', { class: 'small' }, 'This is the closest mix the simulator found.') : null);
+  }
+  function backToBest() { sim.pcts = sim.result.best.pcts.slice(); sim.manual = false; simChanged(true); }
+  function adjustBlock(beans) {
+    var bd = simBounds();
+    return el('section', { class: 'card', 'aria-labelledby': 'adj-h' },
+      el('div', { class: 'row' }, el('h3', { id: 'adj-h' }, 'Adjust by hand'), el('span', { class: 'spacer' }),
+        el('button', { class: 'btn ghost', type: 'button', id: 'adj-back', hidden: !(sim.manual && sim.result && sim.result.best && sim.result.best.pcts), onclick: backToBest }, 'Back to best')),
+      el('div', { class: 'adjust' }, beans.map(function (b, i) {
+        function set(v) { sim.pcts = E.rebalance(sim.pcts, i, v, bd.mins, bd.maxs); sim.manual = true; saveSimDraft(); syncSliders(); refreshAfterManual(); }
+        return el('div', { class: 'arow' },
+          el('label', { class: 'field' }, el('span', null, b.name),
+            el('input', { type: 'range', id: 'sl-' + i, min: 0, max: 100, step: 1, value: sim.pcts[i], style: 'accent-color:' + BEAN_COLORS[i], oninput: function (e) { set(Number(e.target.value)); } })),
+          el('input', { type: 'number', id: 'sln-' + i, min: 0, max: 100, value: sim.pcts[i], 'aria-label': b.name + ' percent', onchange: function (e) { set(Number(e.target.value)); } }));
+      })),
+      el('p', { class: 'muted small' }, 'The other beans keep their proportions and never drop below their minimum share.'));
+  }
+  function syncSliders() {
+    sim.pcts.forEach(function (p, i) { var s = byId('sl-' + i), n = byId('sln-' + i); if (s) s.value = p; if (n && document.activeElement !== n) n.value = p; });
+    var back = byId('adj-back'); if (back) back.hidden = !sim.manual;
+  }
+  var manualTimer;
+  function refreshAfterManual() {
+    clearTimeout(manualTimer);
+    manualTimer = setTimeout(function () {
+      // Re-render the results except the sliders, so dragging continues smoothly.
+      var r = byId('results'); if (!r) return;
+      var adj = r.querySelector('[aria-labelledby="adj-h"]');
+      var fresh = resultsContent();
+      var freshAdj = fresh.querySelector('[aria-labelledby="adj-h"]');
+      if (adj && freshAdj) freshAdj.replaceWith(adj);
+      clear(r); r.appendChild(fresh);
+    }, 40);
+  }
+  function meter(label, v, range) {
+    var pos = function (x) { return ((x - 1) / 4 * 100) + '%'; };
+    var band = null;
+    if (range && (range[0] != null || range[1] != null)) {
+      var lo = range[0] != null ? range[0] : 1, hi = range[1] != null ? range[1] : 5;
+      band = el('div', { class: 'band', style: 'left:' + pos(lo) + ';width:calc(' + pos(hi) + ' - ' + pos(lo) + ')' });
+    }
+    return el('div', { class: 'meter' }, el('span', null, label),
+      el('div', { class: 'track', role: 'img', 'aria-label': label + ' ' + nf(v, 1) + ' of 5' },
+        el('div', { class: 'ticks' }, [0, 1, 2, 3, 4].map(function () { return el('i'); })), band, el('div', { class: 'mark', style: 'left:' + pos(v) })),
+      el('span', { class: 'mono' }, nf(v, 1)));
+  }
+  function cupBlock(ev) {
+    var t = simTarget(), R = rules();
+    var tiers = [['dominant', 'Dominant'], ['supporting', 'Supporting'], ['faint', 'Faint'], ['lost', 'Likely lost']];
+    var fams = Object.keys(ev.notes.families).sort(function (a, b) { return ev.notes.families[b] - ev.notes.families[a]; });
+    var maxF = Math.max.apply(null, fams.map(function (f) { return ev.notes.families[f]; }).concat([0.01]));
+    var pr = ev.pairings;
+    return el('section', { class: 'card', 'aria-labelledby': 'cup-h' },
+      el('div', { class: 'row' }, el('h3', { id: 'cup-h' }, 'Predicted cup'), el('span', { class: 'spacer' }), el('span', { class: 'muted small' }, 'as ' + E.BREWS[sim.brew].label)),
+      el('p', { style: 'font-size:1.05rem' }, ev.notes.summary),
+      el('div', { class: 'meters' }, TATTRS.map(function (a) { return meter(AL[a], ev.values[a], t.ranges[a]); })),
+      el('p', { class: 'muted small' }, 'The shaded band is your target. Robusta and darker roasts weigh more on body and bitterness, bitterness above 3 hides acidity, and sweet or fruity aromas lift perceived sweetness and acidity.'),
+      el('div', { class: 'stack', style: 'gap:6px' }, el('span', { class: 'label' }, 'Cupping-form estimate'),
+        el('div', { class: 'meters' }, meter('Balance', ev.form.balance), meter('Complexity', ev.form.complexity), meter('Finish', ev.form.finish))),
+      pr.synergies.length || pr.clashes.length ? el('div', { class: 'stack', style: 'gap:6px' }, el('span', { class: 'label' }, 'Flavour pairing'),
+        el('ul', { class: 'reasons small' },
+          pr.synergies.map(function (s) { return el('li', null, el('b', { class: 'delta-pos' }, '✓ ' + s.name + ': '), s.text); }),
+          pr.clashes.map(function (c) { return el('li', null, el('b', { class: c.strong ? 'delta-neg' : '' }, (c.strong ? '✕ ' : '! ') + c.name + ': '), c.text); }))) : null,
+      el('div', { class: 'stack', style: 'gap:6px' }, el('span', { class: 'label' }, 'Acidity character'),
+        el('p', { class: 'small' }, ev.acid.dominant ? 'Mostly ' + E.ACID_TYPES[ev.acid.dominant].label.toLowerCase() + '.' : 'No clear acidity character from the bag notes.',
+          ' ', Object.keys(ev.acid.strength).filter(function (k) { return ev.acid.strength[k] >= R.tiers.faint; }).map(function (k) { return E.ACID_TYPES[k].label.split(' (')[0] + ' ' + nf(ev.acid.strength[k], 2); }).join(' · '))),
+      el('div', { class: 'tiers' }, tiers.map(function (tt) {
+        var ns = ev.notes.notes.filter(function (n) { return n.tier === tt[0]; });
+        return el('div', { class: 'tier' }, el('span', { class: 'label' }, tt[1]),
+          ns.length ? el('div', { class: 'chips' }, ns.map(function (n) { return el('span', { class: 'chip' + (n.defect ? ' defect' : ''), title: 'Strength ' + nf(n.strength, 2) + (n.masked ? ' · hidden by bolder notes' : '') }, n.label, el('i', null, nf(n.strength, 2))); })) : el('span', { class: 'muted small' }, '—'));
+      })),
+      ev.must.length || ev.mustNot.length ? el('div', { class: 'chips' },
+        ev.must.map(function (m) { var okk = m.strength >= R.tiers.supporting; return el('span', { class: 'pill ' + (okk ? 'ok' : 'fail') }, (okk ? '✓ ' : '✕ ') + m.label + ' · ' + m.tier); }),
+        ev.mustNot.map(function (m) { var okk = m.strength < R.tiers.supporting; return el('span', { class: 'pill ' + (okk ? 'ok' : 'fail') }, (okk ? '✓ no ' : '✕ ') + m.label + ' · ' + m.tier); })) : null,
+      fams.length ? el('div', { class: 'stack', style: 'gap:6px' }, el('span', { class: 'label' }, 'By SCA flavour wheel family'),
+        fams.map(function (f) { return el('div', { class: 'fam' }, el('span', null, LEX.families[f].label), el('div', null, el('div', { class: 'bar', style: 'width:' + Math.round(ev.notes.families[f] / maxF * 100) + '%' })), el('span', { class: 'mono small' }, nf(ev.notes.families[f], 2))); })) : null);
+  }
+  function altsBlock(alts) {
+    return el('section', { class: 'card', 'aria-labelledby': 'alt-h' },
+      el('h3', { id: 'alt-h' }, 'Other mixes worth cupping'),
+      el('div', { class: 'grid2' }, alts.map(function (a) {
+        return el('div', { class: 'alt' }, el('div', { class: 'row' }, statusPill(a.status, a.headline)),
+          el('div', { class: 'mono', style: 'font-size:1.2rem;font-weight:600' }, a.pcts.join(' : ')), ratioBar(a.pcts),
+          el('p', { class: 'small muted' }, a.notes.summary),
+          el('p', { class: 'small muted' }, 'Balance ' + nf(a.form.balance, 1) + ' · finish ' + nf(a.form.finish, 1)),
+          el('button', { class: 'btn', type: 'button', onclick: function () { sim.pcts = a.pcts.slice(); sim.manual = true; simChanged(true); } }, 'Use this mix'));
+      })));
+  }
+  function cuppingBlock(res, beans) {
+    var wrap = el('section', { class: 'card', 'aria-labelledby': 'cp-h' },
+      el('div', { class: 'row' }, el('h3', { id: 'cp-h' }, 'Cupping table'), el('span', { class: 'spacer' }),
+        el('button', { class: 'btn', type: 'button', onclick: function () {
+          var samples = [{ pcts: sim.pcts.slice(), label: sim.manual ? 'Your mix' : 'Best' }];
+          (res.alternatives || []).forEach(function (a) { samples.push({ pcts: a.pcts, label: 'Alternative' }); });
+          if (samples.length < 3) E.neighbours(sim.pcts).forEach(function (p) { if (samples.length < 3) samples.push({ pcts: p, label: 'Neighbour' }); });
+          sim.cupping = E.cuppingPlan(samples, { brew: sim.brew });
+          refreshResults();
+        } }, sim.cupping ? 'New codes' : 'Plan the cupping table')),
+      el('p', { class: 'muted small' }, 'Confirm the prediction before you pack. Three blind-coded samples follow SCA protocol: 8,25 g per 150 ml at 93 °C.'));
+    var plan = sim.cupping;
+    if (!plan) return wrap;
+    wrap.appendChild(el('div', { class: 'samples' }, plan.samples.map(function (s) {
+      return el('div', { class: 'sample' }, el('span', { class: 'label' }, s.label), el('span', { class: 'code' }, s.code),
+        el('div', { class: 'mono small' }, s.pcts.join(' : ')),
+        el('table', null, el('tbody', null, beans.map(function (b, i) { return el('tr', null, el('td', null, el('span', { class: 'dot', style: 'background:' + BEAN_COLORS[i] }), ' ', b.name), el('td', { class: 'num mono' }, fmtG(s.grams[i], 1))); }))),
+        el('button', { class: 'btn', type: 'button', onclick: function () { startCupDraft(s.code, s.pcts); } }, 'Log results for ' + s.code));
+    })));
+    wrap.appendChild(el('ol', { class: 'steps small' }, plan.steps.map(function (s) { return el('li', null, s); })));
+    if (plan.brewNote) wrap.appendChild(el('p', { class: 'small' }, plan.brewNote));
+    return wrap;
+  }
+  function startCupDraft(code, pcts) {
+    var beans = simBeans();
+    var ev = E.evaluateMix(beans, pcts, simTarget(), solveOpts());
+    state.cupDraft = {
+      code: code || '', brew: sim.brew, blendName: sim.saveName || '',
+      items: beans.map(function (b, i) { return { beanId: b.id || null, name: b.name, pct: pcts[i], quick: !!b.quick, species: b.species, roast: b.roast, process: b.process }; }),
+      predicted: { body: ev.values.body, acidity: ev.values.acidity, sweetness: ev.values.sweetness, bitterness: ev.values.bitterness },
+      predictedNotes: ev.notes.notes.filter(function (n) { return n.tier === 'dominant' || n.tier === 'supporting'; }).map(function (n) { return n.label; }),
+      actual: { body: '', acidity: '', sweetness: '', bitterness: '' }, tastedNotes: '', clean: true, defects: '', overall: '', scaScore: '',
+      form: 'simple', cva: { fragrance: '', aroma: '', flavour: '', aftertaste: '', acidity: '', sweetness: '', mouthfeel: '', bitterness: '', liking: '' }
+    };
+    go('cupping');
+  }
+  var planTimer;
+  function makeBlock(beans) {
+    var pw = E.planWeighOut(sim.pcts, BAGS.map(function (g) { return { bagG: g, count: sim.plan[g] || 0 }; }));
+    var allSaved = beans.every(function (b) { return !b.quick; });
+    var short = beans.map(function (b, i) { return b.stockG == null ? null : Math.max(0, pw.perBean[i] - b.stockG); });
+    var anyShort = short.some(function (s) { return s > 0; });
+    var maxRows = BAGS.map(function (g) {
+      var m = allSaved ? E.maxBags(sim.pcts, g, beans.map(function (b) { return b.stockG || 0; })) : null;
+      var per = E.weighOut(sim.pcts, g);
+      return el('tr', null, el('td', null, bagLabel(g)),
+        beans.map(function (b, i) { return el('td', { class: 'num mono' }, fmtG(per[i])); }),
+        el('td', { class: 'num mono' }, m && m.bags != null ? nf(m.bags) : '—'),
+        el('td', null, m && m.limiting >= 0 ? beans[m.limiting].name : allSaved ? '' : 'Save the beans to check stock'));
+    });
+    return el('section', { class: 'card', 'aria-labelledby': 'mk-h' },
+      el('h3', { id: 'mk-h' }, 'Make it'),
+      el('div', { class: 'tablewrap' }, el('table', null,
+        el('thead', null, el('tr', null, el('th', null, 'Per bag'), beans.map(function (b, i) { return el('th', { class: 'num' }, el('span', { class: 'dot', style: 'background:' + BEAN_COLORS[i] }), ' ', b.name); }), el('th', { class: 'num' }, 'Max bags'), el('th', null, 'Runs out first'))),
+        el('tbody', null, maxRows))),
+      el('div', { class: 'row' }, el('span', { class: 'label' }, 'Bag plan'), BAGS.map(function (g) {
+        return el('label', { class: 'row tight small' }, el('input', { type: 'number', id: 'plan-' + g, min: 0, value: sim.plan[g] || 0, style: 'width:80px', oninput: function (e) {
+          sim.plan[g] = Math.max(0, Math.floor(Number(e.target.value) || 0)); saveSimDraft();
+          clearTimeout(planTimer); planTimer = setTimeout(render, 350);
+        } }), '× ' + bagLabel(g));
+      })),
+      el('div', { class: 'tablewrap' }, el('table', null,
+        el('thead', null, el('tr', null, el('th', null, 'Bean'), el('th', { class: 'num' }, 'Weigh out'), el('th', { class: 'num' }, 'In stock'), el('th', { class: 'num' }, 'Short by'))),
+        el('tbody', null, beans.map(function (b, i) {
+          return el('tr', null, el('td', null, b.name), el('td', { class: 'num mono' }, fmtG(pw.perBean[i])),
+            el('td', { class: 'num mono' }, b.stockG == null ? '—' : fmtG(b.stockG)),
+            el('td', { class: 'num mono' + (short[i] > 0 ? ' delta-neg' : '') }, short[i] == null ? '—' : short[i] > 0 ? fmtG(short[i]) : '0 g'));
+        }), el('tr', null, el('td', null, el('b', null, 'Total')), el('td', { class: 'num mono' }, el('b', null, fmtKg(pw.totalG))), el('td'), el('td'))))),
+      el('div', { class: 'row' },
+        el('button', { class: 'btn', type: 'button', disabled: !allSaved || anyShort || !pw.totalG, onclick: function () { logBatch(beans, pw); } }, 'Log this batch and deduct stock'),
+        !allSaved ? el('span', { class: 'muted small' }, 'Quick beans have no stock. Save them under My beans to log batches.') : anyShort ? el('span', { class: 'small delta-neg' }, 'Not enough stock for this plan.') : null));
+  }
+  async function logBatch(beans, pw) {
+    var live = beans.map(function (b) { return beanById(b.id); });
+    if (live.some(function (b) { return !b; })) { toast('One of these beans was deleted. Pick another bean first.', true); return; }
+    try {
+      for (var i = 0; i < live.length; i++) await patchDoc('beans', live[i].id, { stockG: Math.max(0, (live[i].stockG || 0) - pw.perBean[i]) });
+      await putDoc('batches', uid('t'), {
+        blendName: sim.saveName || beans.map(function (b) { return b.name; }).join(' + '),
+        items: beans.map(function (b, i) { return { beanId: b.id, name: b.name, grams: pw.perBean[i], pct: sim.pcts[i] }; }),
+        plan: BAGS.map(function (g) { return { bagG: g, count: sim.plan[g] || 0 }; }).filter(function (p) { return p.count; }),
+        totalG: pw.totalG, brew: sim.brew, createdAt: Date.now(), undone: false
+      });
+      toast('Batch logged. Stock deducted.');
+    } catch (e) { /* toast already shown */ }
+  }
+  function saveBlock(ev) {
+    return el('section', { class: 'card', 'aria-labelledby': 'sv-h' },
+      el('h3', { id: 'sv-h' }, 'Save this blend'),
+      el('div', { class: 'row' },
+        el('input', { type: 'text', id: 'save-name', placeholder: 'e.g. House Blend v2', value: sim.saveName, style: 'flex:1;min-width:160px', oninput: function (e) { sim.saveName = e.target.value; saveSimDraft(); } }),
+        el('button', { class: 'btn primary', type: 'button', onclick: async function () {
+          var name = (sim.saveName || '').trim();
+          if (!name) { toast('Give the blend a name first.', true); return; }
+          try {
+            await putDoc('blends', uid('l'), {
+              name: name, rows: sim.rows.map(function (r) { var c = Object.assign({}, r); delete c.key; return c; }),
+              pcts: sim.pcts.slice(), brew: sim.brew, ranges: sim.ranges, mustText: sim.mustText, notText: sim.notText,
+              status: ev.status, summary: ev.notes.summary, createdAt: Date.now()
+            });
+            toast('Saved "' + name + '".');
+          } catch (e) { /* toast shown */ }
+        } }, 'Save blend')),
+      el('button', { class: 'btn ghost', type: 'button', onclick: function () { startCupDraft('', sim.pcts); } }, 'Log a cupping for this mix'));
+  }
+
+  // ---------------- AI (optional, advisory) ----------------
+  var aiCtl = null;
+  var aiState = { text: '', busy: false, error: '' };
+  function aiError(code) {
+    if (code === 'not_granted' || code === 'sampling_disabled' || code === 'not_declared' || code === 'capability_disabled' || code === 'capability_removed') { state.aiHidden = true; return ''; }
+    if (code === 'rate_limited') return 'Claude is busy or you have hit a usage limit. Try again later.';
+    if (code === 'session_expired') return 'Sign in to claude.ai again to use the assistant.';
+    if (code === 'cancelled') return '';
+    return 'The assistant couldn\'t answer. Try again.';
+  }
+  function describeForAI(ev, beans) {
+    var lines = ['Brew style: ' + E.BREWS[sim.brew].label];
+    beans.forEach(function (b, i) {
+      lines.push('- ' + b.name + ': ' + sim.pcts[i] + '%, ' + b.species + ', ' + procLabel(b.process) + ', roast ' + b.roast + '/5, bag notes "' + b.notes.map(function (n) { return n.label; }).join(', ') + '", scores ' +
+        ATTRS.map(function (a) { return a + ' ' + E.effScore(b, a); }).join(', '));
+    });
+    var t = simTarget();
+    lines.push('Target ranges (as served): ' + TATTRS.map(function (a) { var r = t.ranges[a]; return r[0] == null && r[1] == null ? null : a + ' ' + (r[0] != null ? r[0] : 'any') + '–' + (r[1] != null ? r[1] : 'any'); }).filter(Boolean).join('; '));
+    if (t.must.length) lines.push('Must taste: ' + t.must.join(', '));
+    if (t.mustNot.length) lines.push('Must not taste: ' + t.mustNot.join(', '));
+    lines.push('Predicted as served: ' + TATTRS.map(function (a) { return a + ' ' + ev.values[a]; }).join(', '));
+    lines.push('Cupping-form estimate: balance ' + ev.form.balance + ', complexity ' + ev.form.complexity + ', finish ' + ev.form.finish);
+    lines.push('Predicted notes: ' + ev.notes.summary);
+    if (ev.pairings.synergies.length) lines.push('Pairings that work: ' + ev.pairings.synergies.map(function (s) { return s.name; }).join(', '));
+    if (ev.pairings.clashes.length) lines.push('Clashes: ' + ev.pairings.clashes.map(function (s) { return s.name; }).join(', '));
+    lines.push('Verdict: ' + ev.headline + (ev.reasons.length ? '. Reasons: ' + ev.reasons.join(' ') : '') + (ev.warnings.length ? '. Warnings: ' + ev.warnings.join(' ') : ''));
+    return lines.join('\n');
+  }
+  async function askAI(kind, ev, beans) {
+    if (!state.sample) return;
+    if (aiCtl) aiCtl.abort();
+    aiCtl = new AbortController();
+    aiState = { text: '', busy: true, error: '' };
+    renderAI(ev, beans);
+    var data = describeForAI(ev, beans);
+    var others = state.beans.filter(function (b) { return !beans.some(function (x) { return x.id === b.id; }); })
+      .map(function (b) { return '- ' + b.name + ' (' + b.species + ', ' + procLabel(beanProcess(b)) + ', roast ' + b.roast + ', notes: ' + (b.bagNotes || '') + ')'; }).join('\n');
+    var prompts = {
+      explain: 'You are a licensed Q grader helping a coffee reseller in Indonesia who blends roasted beans bought from other roasteries. Explain this simulated blend in plain language, in at most 6 short bullet points: why the simulator chose this ratio, what the cup will likely taste like as served, the main risks, and what to check at the cupping table. Do not propose different numbers; the ratio and scores come from a deterministic simulator.\n\n' + data,
+      suggest: 'You are a licensed Q grader. A reseller wants to reach the target below with a blend of already-roasted beans. Based on the verdict, suggest which ONE or TWO of their other saved beans (listed) could help, or what kind of bean (origin, species, process, roast level, notes) they should look for if none fit. Explain why in at most 5 short bullets. Do not invent exact ratios.\n\n' + data + '\n\nTheir other saved beans:\n' + (others || '(none)'),
+      label: 'Write a short retail label description for this coffee blend: 2 sentences in English, then the same in Bahasa Indonesia. Mention the 2–3 strongest predicted notes and the best way to brew it. No exaggerated claims, no health claims, no ratio numbers.\n\n' + data
+    };
+    try {
+      await state.sample(prompts[kind], { signal: aiCtl.signal, onText: function (u) { aiState.text = u.text; var o = byId('ai-out'); if (o) o.textContent = u.text; } });
+      aiState.busy = false;
+    } catch (e) {
+      aiState.busy = false; aiState.text = (e && e.text) || aiState.text; aiState.error = aiError(e && e.code);
+    }
+    renderAI(ev, beans);
+  }
+  function renderAI(ev, beans) { var box = byId('ai-box'); if (box) box.replaceWith(aiBlock(ev, beans) || el('span')); }
+  function aiBlock(ev, beans) {
+    if (!state.sample || state.aiHidden) return null;
+    return el('section', { class: 'card', id: 'ai-box', 'aria-labelledby': 'ai-h' },
+      el('div', { class: 'row' }, el('h3', { id: 'ai-h' }, 'Ask the assistant'), el('span', { class: 'spacer' }), el('span', { class: 'muted small' }, 'Advice only. It never changes your ratio.')),
+      el('div', { class: 'row' },
+        el('button', { class: 'btn', type: 'button', disabled: aiState.busy, onclick: function () { askAI('explain', ev, beans); } }, 'Explain this result'),
+        el('button', { class: 'btn', type: 'button', disabled: aiState.busy, onclick: function () { askAI('suggest', ev, beans); } }, 'Suggest a bean to add'),
+        el('button', { class: 'btn', type: 'button', disabled: aiState.busy, onclick: function () { askAI('label', ev, beans); } }, 'Draft a label blurb'),
+        aiState.busy ? el('button', { class: 'btn ghost', type: 'button', onclick: function () { if (aiCtl) aiCtl.abort(); } }, 'Stop') : null),
+      aiState.busy || aiState.text ? el('div', { class: 'ai-out', id: 'ai-out' }, aiState.text || 'Thinking…') : null,
+      aiState.error ? el('p', { class: 'small delta-neg' }, aiState.error) : null);
+  }
+
+  // ---------------- My beans ----------------
+  function blankBeanForm(originId, process) {
+    var o = originById(originId) || originById('id-gayo');
+    var p = process || mainProcess(o);
+    return { id: null, name: '', originId: o.id, roastery: '', species: o.species, roast: 3, process: p, varietal: 'unknown', producer: '', altitude: o.altitude || '', cupScore: '', bagNotes: '', scores: E.scoresFor(o, 3, p), stockG: 1000 };
+  }
+  function viewBeans() {
+    var f = state.beanForm;
+    var parts = [el('div', { class: 'row' }, el('h2', null, 'My beans'), el('span', { class: 'spacer' }),
+      !f ? el('button', { class: 'btn primary', type: 'button', onclick: function () { state.beanForm = blankBeanForm(); render(); } }, '+ Add a bean') : null)];
+    if (f) parts.push(beanForm(f));
+    if (!state.beans.length && !f) {
+      parts.push(el('div', { class: 'empty' },
+        el('p', null, state.mode === 'connecting' ? 'Loading your beans…' : 'No beans yet. Add each roasted bean you buy, with the notes printed on its bag and how many grams you have.'),
+        el('button', { class: 'btn primary', type: 'button', onclick: function () { state.beanForm = blankBeanForm(); render(); } }, 'Add your first bean')));
+    }
+    parts.push(el('div', { class: 'list' }, state.beans.map(beanCard)));
+    return el('div', { class: 'stack' }, parts);
+  }
+  function beanCard(b) {
+    var o = originById(b.originId);
+    var confirming = state.confirm === 'bean:' + b.id;
+    var learned = (b.calibCount || 0) > 0 || Object.keys(b.noteCalib || {}).length > 0;
+    return el('article', { class: 'card' },
+      el('div', { class: 'row' }, el('h3', null, b.name), speciesBadge(b.species), procBadge(beanProcess(b)), el('span', { class: 'spacer' }), el('span', { class: 'mono' }, fmtKg(b.stockG || 0))),
+      el('p', { class: 'muted small' }, [o ? o.country + ' · ' + o.region : 'Custom origin', b.producer || null, b.varietal && b.varietal !== 'unknown' ? (E.VARIETALS[b.varietal] || {}).label : null,
+        b.altitude || null, b.roastery ? 'from ' + b.roastery : null, procLabel(beanProcess(b)), E.roastColour(b.roast).name + ' roast', b.cupScore ? 'cup score ' + nf(b.cupScore, 2) : null].filter(Boolean).join(' · ')),
+      noteChips(b.bagNotes, { noteCalib: b.noteCalib }), scoreLine(b.scores, b.calib),
+      b.calibCount ? el('p', { class: 'small muted' }, 'Adjusted by ' + b.calibCount + ' cupping' + (b.calibCount > 1 ? 's' : '') + '.') : null,
+      el('div', { class: 'row' },
+        el('button', { class: 'btn', type: 'button', onclick: function () { state.beanForm = Object.assign({ varietal: 'unknown', producer: '', altitude: '', cupScore: '' }, b, { process: beanProcess(b), scores: Object.assign({}, b.scores) }); if (state.beanForm.cupScore == null) state.beanForm.cupScore = ''; render(); window.scrollTo(0, 0); } }, 'Edit'),
+        el('button', { class: 'btn', type: 'button', onclick: function () { addToSim(b.id); } }, 'Use in simulator'),
+        learned ? el('button', { class: 'btn ghost', type: 'button', onclick: async function () { try { await patchDoc('beans', b.id, { calib: {}, noteCalib: {}, calibCount: 0 }); toast('Cupping adjustments reset for ' + b.name + '.'); } catch (e) { /* shown */ } } }, 'Reset cupping adjustments') : null,
+        el('span', { class: 'spacer' }),
+        confirming ? el('span', { class: 'row tight' }, el('span', { class: 'small' }, 'Delete this bean?'),
+          el('button', { class: 'btn danger', type: 'button', onclick: async function () { state.confirm = null; try { await delDoc('beans', b.id); toast('Deleted ' + b.name + '.'); } catch (e) { /* shown */ } } }, 'Delete'),
+          el('button', { class: 'btn ghost', type: 'button', onclick: function () { state.confirm = null; render(); } }, 'Keep'))
+          : el('button', { class: 'btn ghost danger', type: 'button', onclick: function () { state.confirm = 'bean:' + b.id; render(); } }, 'Delete')));
+  }
+  function addToSim(beanId) {
+    if (sim.rows.some(function (r) { return r.beanId === beanId; })) { go('simulator'); return; }
+    sim.rows = sim.rows.filter(function (r) { return !/^Example/.test(r.name || ''); });
+    if (sim.rows.length >= 5) { toast('The mix already has 5 beans. Remove one first.', true); go('simulator'); return; }
+    sim.rows.push(savedRow(beanId));
+    clearMix(); saveSimDraft(); go('simulator');
+  }
+  function beanForm(f) {
+    function snap() { return { originId: f.originId, roast: f.roast, process: f.process, varietal: f.varietal }; }
+    function rederive(prev) {
+      var before = derived(prev.originId, prev.roast, prev.process, prev.varietal);
+      if (!before || sameScores(f.scores, before)) f.scores = derived(f.originId, f.roast, f.process, f.varietal) || f.scores;
+      render();
+    }
+    var current = derived(f.originId, f.roast, f.process, f.varietal);
+    var o = originById(f.originId);
+    return el('section', { class: 'card', 'aria-labelledby': 'bf-h' },
+      el('h3', { id: 'bf-h' }, f.id ? 'Edit ' + (f.name || 'bean') : 'Add a bean'),
+      el('div', { class: 'grid2' },
+        field('Name', el('input', { type: 'text', id: 'bf-name', value: f.name, placeholder: 'e.g. Gayo Wine from Roastery X', oninput: function (e) { f.name = e.target.value; } })),
+        field('Roastery', el('input', { type: 'text', id: 'bf-roastery', value: f.roastery, oninput: function (e) { f.roastery = e.target.value; } }))),
+      el('div', { class: 'grid2' },
+        field('Origin', originSelect('bf-origin', f.originId, function (e) {
+          var prev = snap(), prevO = originById(f.originId), no = originById(e.target.value);
+          f.originId = e.target.value;
+          if (no) { f.species = no.species; f.process = mainProcess(no); if (f.bagNotes && prevO && f.bagNotes === prevO.notes) f.bagNotes = no.notes; }
+          rederive(prev);
+        }, true)),
+        field('Species', el('select', { id: 'bf-species', value: f.species, onchange: function (e) { f.species = e.target.value; } }, SPECIES.map(function (s) { return opt(s, s); })))),
+      el('div', { class: 'grid4' },
+        field('Process', processSelect('bf-process', f.process, function (e) { var prev = snap(); f.process = e.target.value; rederive(prev); })),
+        field('Varietal', varietalSelect('bf-varietal', f.varietal, function (e) { var prev = snap(); f.varietal = e.target.value; rederive(prev); })),
+        field('Roast colour', roastSelect('bf-roast', f.roast, function (e) { var prev = snap(); f.roast = Number(e.target.value); rederive(prev); })),
+        field('Stock (grams)', el('input', { type: 'number', id: 'bf-stock', min: 0, step: 50, value: f.stockG, oninput: function (e) { f.stockG = Math.max(0, Number(e.target.value) || 0); } }))),
+      el('div', { class: 'grid4' },
+        field('Producer / washing station', el('input', { type: 'text', id: 'bf-producer', value: f.producer || '', placeholder: 'e.g. Ketiara co-op', oninput: function (e) { f.producer = e.target.value; } })),
+        field('Altitude', el('input', { type: 'text', id: 'bf-alt', value: f.altitude || '', placeholder: 'e.g. 1.400–1.600 m', oninput: function (e) { f.altitude = e.target.value; } })),
+        field('Cup score (0–100)', el('input', { type: 'number', id: 'bf-cup', min: 0, max: 100, step: 0.25, value: f.cupScore == null ? '' : f.cupScore, placeholder: 'e.g. 85,5', oninput: function (e) { f.cupScore = e.target.value === '' ? '' : Number(e.target.value); } }), 'From the roastery or your own cupping'),
+        el('span')),
+      el('p', { class: 'muted small' }, (E.PROCESSES[f.process] || E.PROCESSES.full).note),
+      field('Notes printed on the bag', el('textarea', { id: 'bf-notes', value: f.bagNotes, placeholder: o ? 'Typical for this origin: ' + o.notes : 'e.g. dark chocolate, gula aren, orange zest', oninput: function (e) { f.bagNotes = e.target.value; }, onchange: function () { render(); } }), 'Type what the roastery printed, in English or Bahasa Indonesia, separated by commas.'),
+      !f.bagNotes && o ? el('button', { class: 'btn ghost', type: 'button', onclick: function () { f.bagNotes = o.notes; render(); } }, 'Use the typical notes for this origin') : null,
+      noteChips(f.bagNotes, { showIgnored: true }),
+      el('div', { class: 'grid4' }, ATTRS.map(function (a) {
+        return field(AL[a] + ' (1–5)', el('input', { type: 'number', id: 'bf-sc-' + a, min: 1, max: 5, step: 0.5, value: f.scores[a], oninput: function (e) { var v = Number(e.target.value); if (v >= 1 && v <= 5) f.scores[a] = v; }, onchange: function () { render(); } }));
+      })),
+      el('div', { class: 'row' }, el('p', { class: 'muted small', style: 'flex:1' }, 'Scores start from the origin\'s typical values for this process and roast level. Change them to match what you taste; your changes are kept when you switch roast or process.'),
+        current && !sameScores(f.scores, current) ? el('button', { class: 'btn ghost', type: 'button', onclick: function () { f.scores = current; render(); } }, 'Reset to origin scores') : null),
+      el('div', { class: 'row' },
+        el('button', { class: 'btn primary', type: 'button', onclick: async function () {
+          if (!f.name.trim()) { toast('Give the bean a name.', true); return; }
+          var data = { name: f.name.trim(), roastery: f.roastery || '', originId: f.originId || '', species: f.species, roast: f.roast, process: f.process, bagNotes: f.bagNotes || '', scores: f.scores, stockG: f.stockG || 0,
+            varietal: f.varietal || 'unknown', producer: f.producer || '', altitude: f.altitude || '', cupScore: f.cupScore === '' || f.cupScore == null ? null : Number(f.cupScore),
+            calib: f.calib || {}, noteCalib: f.noteCalib || {}, calibCount: f.calibCount || 0, createdAt: f.createdAt || Date.now() };
+          try { await putDoc('beans', f.id || uid('b'), data); state.beanForm = null; toast('Saved ' + data.name + '.'); render(); } catch (e) { /* shown */ }
+        } }, 'Save bean'),
+        el('button', { class: 'btn ghost', type: 'button', onclick: function () { state.beanForm = null; render(); } }, 'Cancel')));
+  }
+
+  // ---------------- Cupping log ----------------
+  function viewCupping() {
+    var parts = [el('div', { class: 'row' }, el('h2', null, 'Cupping log'), el('span', { class: 'spacer' }),
+      !state.cupDraft ? el('button', { class: 'btn', type: 'button', onclick: function () { if (!sim.pcts) { toast('Run the simulator first, then log a cupping for its mix.', true); go('simulator'); return; } startCupDraft('', sim.pcts); } }, '+ Log cupping for the current mix') : null)];
+    if (state.cupDraft) parts.push(cupForm(state.cupDraft));
+    if (!state.cuppings.length && !state.cupDraft) parts.push(el('div', { class: 'empty' }, el('p', null, 'No cupping entries yet. Plan a cupping table in the simulator, cup the coded samples blind, then log what you tasted here. Each entry can correct the simulator for your beans: their scores and which bag notes really come through.')));
+    parts.push(el('div', { class: 'list' }, state.cuppings.map(cupCard)));
+    return el('div', { class: 'stack' }, parts);
+  }
+  function scoreSelect(id, value, onchange) {
+    var vals = ['', '1', '1.5', '2', '2.5', '3', '3.5', '4', '4.5', '5'];
+    return el('select', { id: id, value: String(value), onchange: onchange }, vals.map(function (v) { return opt(v, v === '' ? '—' : v.replace('.', ',')); }));
+  }
+  function cupForm(d) {
+    return el('section', { class: 'card', 'aria-labelledby': 'cf-h' },
+      el('h3', { id: 'cf-h' }, 'What did you taste?'),
+      el('p', { class: 'muted small' }, 'Mix: ' + d.items.map(function (it) { return it.name + ' ' + it.pct + '%'; }).join(' · ') + ' · ' + E.BREWS[d.brew].label),
+      el('div', { class: 'grid2' },
+        field('Sample code', el('input', { type: 'text', id: 'cf-code', value: d.code, oninput: function (e) { d.code = e.target.value; } })),
+        field('Blend name (optional)', el('input', { type: 'text', id: 'cf-name', value: d.blendName, oninput: function (e) { d.blendName = e.target.value; } }))),
+      el('div', { class: 'seg', role: 'radiogroup', 'aria-label': 'Cupping form' },
+        el('label', null, el('input', { type: 'radio', name: 'cf-form', id: 'cf-form-s', checked: d.form !== 'cva', onchange: function () { d.form = 'simple'; render(); } }), el('span', null, 'Quick (1–5)')),
+        el('label', null, el('input', { type: 'radio', name: 'cf-form', id: 'cf-form-c', checked: d.form === 'cva', onchange: function () { d.form = 'cva'; render(); } }), el('span', null, 'CVA-style (0–15 intensity)'))),
+      d.form === 'cva' ? el('div', { class: 'stack', style: 'gap:8px' },
+        el('p', { class: 'muted small' }, 'Descriptive part: score how strong each attribute is (0 = none, 15 = extremely intense), not how good it is. Mouthfeel, acidity and sweetness feed the learning.'),
+        el('div', { class: 'grid4' }, ['fragrance', 'aroma', 'flavour', 'aftertaste', 'acidity', 'sweetness', 'mouthfeel'].map(function (k) {
+          return field(k.charAt(0).toUpperCase() + k.slice(1) + ' (0–15)', el('input', { type: 'number', id: 'cva-' + k, min: 0, max: 15, step: 0.5, value: d.cva[k], oninput: function (e) { d.cva[k] = e.target.value; } }),
+            k === 'acidity' || k === 'sweetness' ? 'Predicted ' + nf((d.predicted[k] - 1) * 15 / 4, 1) : k === 'mouthfeel' ? 'Predicted ' + nf((d.predicted.body - 1) * 15 / 4, 1) : null);
+        }), field('Bitterness (1–5)', scoreSelect('cva-bitterness', d.cva.bitterness, function (e) { d.cva.bitterness = e.target.value; }), 'Predicted ' + nf(d.predicted.bitterness, 1))),
+        field('Affective: overall liking (1–9)', el('input', { type: 'number', id: 'cva-liking', min: 1, max: 9, step: 1, value: d.cva.liking, oninput: function (e) { d.cva.liking = e.target.value; } }), '1 = extremely low quality, 9 = extremely high quality'))
+        : el('div', { class: 'grid4' }, ATTRS.map(function (a) {
+          return field(AL[a], scoreSelect('cf-' + a, d.actual[a], function (e) { d.actual[a] = e.target.value; }), 'Predicted ' + nf(d.predicted[a], 1));
+        })),
+      field('Notes you tasted', el('input', { type: 'text', id: 'cf-notes', value: d.tastedNotes, placeholder: 'e.g. dark chocolate, palm sugar, orange', oninput: function (e) { d.tastedNotes = e.target.value; } }), 'Predicted strongest: ' + (d.predictedNotes.join(', ') || 'none') + '. List everything you tasted; the tool learns from what is missing too.'),
+      el('div', { class: 'grid2' },
+        el('label', { class: 'row tight' }, el('input', { type: 'checkbox', id: 'cf-clean', checked: d.clean, onchange: function (e) { d.clean = e.target.checked; render(); } }), 'Clean cup (no defects in any of the 5 cups)'),
+        !d.clean ? field('Defects found', el('input', { type: 'text', id: 'cf-def', value: d.defects, placeholder: 'e.g. rubbery in 2 of 5 cups', oninput: function (e) { d.defects = e.target.value; } })) : el('span')),
+      el('div', { class: 'grid2' },
+        field('Overall (1–5)', scoreSelect('cf-overall', d.overall, function (e) { d.overall = e.target.value; })),
+        field('SCA score (optional)', el('input', { type: 'number', id: 'cf-sca', min: 0, max: 100, step: 0.25, value: d.scaScore, placeholder: 'e.g. 82.5', oninput: function (e) { d.scaScore = e.target.value; } }))),
+      el('div', { class: 'row' },
+        el('button', { class: 'btn primary', type: 'button', onclick: async function () {
+          var actual = {}, any = false, cva = null;
+          if (d.form === 'cva') {
+            actual = E.cvaToModel(d.cva); any = Object.keys(actual).length > 0;
+            cva = {}; Object.keys(d.cva).forEach(function (k) { if (d.cva[k] !== '' && isFinite(d.cva[k])) cva[k] = Number(d.cva[k]); });
+          } else {
+            ATTRS.forEach(function (a) { if (d.actual[a] !== '') { actual[a] = Number(d.actual[a]); any = true; } });
+          }
+          if (!any && !d.tastedNotes.trim()) { toast('Score at least one attribute or list the notes you tasted.', true); return; }
+          try {
+            await putDoc('cuppings', uid('c'), {
+              code: d.code || '', blendName: d.blendName || '', brew: d.brew, items: d.items, predicted: d.predicted, predictedNotes: d.predictedNotes,
+              actual: actual, tastedNotes: d.tastedNotes || '', clean: !!d.clean, defects: d.clean ? '' : (d.defects || ''),
+              overall: d.overall === '' ? null : Number(d.overall), scaScore: d.scaScore === '' ? null : Number(d.scaScore), cva: cva,
+              applied: false, deltas: {}, createdAt: Date.now()
+            });
+            state.cupDraft = null; toast('Cupping saved. Review it below, then apply the learning if it looks right.'); render();
+          } catch (e) { /* shown */ }
+        } }, 'Save cupping'),
+        el('button', { class: 'btn ghost', type: 'button', onclick: function () { state.cupDraft = null; render(); } }, 'Cancel')));
+  }
+  function cupBeans(c) {
+    return c.items.map(function (it) {
+      var b = it.beanId ? beanById(it.beanId) : null;
+      return b ? savedBean(b) : { id: null, quick: true, name: it.name, species: it.species || 'arabica', roast: it.roast || 3, scores: {}, notes: [] };
+    });
+  }
+  function getDeltas(c) {
+    var d = c.deltas || {};
+    if (d.attrs || d.notes) return { attrs: d.attrs || {}, notes: d.notes || {} };
+    return { attrs: d, notes: {} };
+  }
+  function cupCard(c) {
+    var tasted = parse(c.tastedNotes).known;
+    var tastedLabels = tasted.map(function (n) { return n.label; });
+    var missed = (c.predictedNotes || []).filter(function (n) { return tastedLabels.indexOf(n) < 0; });
+    var surprise = tastedLabels.filter(function (n) { return (c.predictedNotes || []).indexOf(n) < 0; });
+    var beans = cupBeans(c), pcts = c.items.map(function (i) { return i.pct; });
+    var preview = c.applied ? getDeltas(c) : {
+      attrs: E.calibrate(beans, pcts, c.predicted, c.actual || {}, rules()),
+      notes: c.tastedNotes ? E.calibrateNotes(beans, pcts, c.brew, tasted, rules()) : {}
+    };
+    var ids = Object.keys(preview.attrs).concat(Object.keys(preview.notes)).filter(function (v, i, a) { return a.indexOf(v) === i; });
+    var confirming = state.confirm === 'cup:' + c.id;
+    return el('article', { class: 'card' },
+      el('div', { class: 'row' }, el('h3', null, (c.code ? 'Code ' + c.code : 'Cupping') + (c.blendName ? ' · ' + c.blendName : '')),
+        c.clean ? el('span', { class: 'pill ok' }, 'Clean cup') : el('span', { class: 'pill fail' }, 'Defects'),
+        el('span', { class: 'spacer' }), el('span', { class: 'muted small' }, dateStr(c.createdAt))),
+      el('p', { class: 'muted small' }, c.items.map(function (it) { return it.name + ' ' + it.pct + '%'; }).join(' · ') + ' · ' + (E.BREWS[c.brew] || E.BREWS.filter).label +
+        (c.overall != null ? ' · overall ' + c.overall + '/5' : '') + (c.scaScore != null ? ' · SCA ' + nf(c.scaScore, 2) : '')),
+      el('div', { class: 'tablewrap' }, el('table', null,
+        el('thead', null, el('tr', null, el('th', null, ''), ATTRS.map(function (a) { return el('th', { class: 'num' }, AL[a]); }))),
+        el('tbody', null,
+          el('tr', null, el('td', null, 'Predicted'), ATTRS.map(function (a) { return el('td', { class: 'num mono' }, nf(c.predicted[a], 1)); })),
+          el('tr', null, el('td', null, 'Tasted'), ATTRS.map(function (a) { return el('td', { class: 'num mono' }, c.actual && c.actual[a] != null ? nf(c.actual[a], 1) : '—'); })),
+          el('tr', null, el('td', null, 'Difference'), ATTRS.map(function (a) {
+            if (!c.actual || c.actual[a] == null) return el('td', { class: 'num' }, '—');
+            var d = c.actual[a] - c.predicted[a];
+            return el('td', { class: 'num mono ' + (Math.abs(d) < 0.25 ? '' : d > 0 ? 'delta-pos' : 'delta-neg') }, (d > 0 ? '+' : '') + nf(d, 1));
+          }))))),
+      c.cva ? el('p', { class: 'small mono' }, 'CVA intensities: ' + Object.keys(c.cva).filter(function (k) { return k !== 'liking' && k !== 'bitterness'; }).map(function (k) { return k + ' ' + nf(c.cva[k], 1); }).join(' · ') +
+        (c.cva.liking != null ? ' · liking ' + c.cva.liking + '/9' : '')) : null,
+      missed.length ? el('p', { class: 'small' }, 'Predicted but not tasted: ' + missed.join(', ') + '.') : null,
+      surprise.length ? el('p', { class: 'small' }, 'Tasted but not predicted: ' + surprise.join(', ') + '. If a bean really has this note, add it to that bean\'s bag notes.') : null,
+      !c.clean && c.defects ? el('p', { class: 'small delta-neg' }, 'Defects: ' + c.defects) : null,
+      ids.length ? el('div', { class: 'small' }, el('span', { class: 'label' }, c.applied ? 'Learning applied' : 'Learning to apply'),
+        el('ul', { class: 'reasons' }, ids.map(function (id) {
+          var b = beanById(id), a = preview.attrs[id] || {}, n = preview.notes[id] || {};
+          var bits = Object.keys(a).map(function (k) { return AL[k].toLowerCase() + ' ' + (a[k] > 0 ? '+' : '') + nf(a[k], 2); })
+            .concat(Object.keys(n).map(function (k) { var note = noteIndex().notes[k]; return (note ? note.label.toLowerCase() : k) + ' note ×' + nf(n[k].to, 2) + (n[k].to < n[k].from ? ' (weaker)' : ' (stronger)'); }));
+          return el('li', null, (b ? b.name : 'Deleted bean') + ': ' + bits.join(', '));
+        }))) : el('p', { class: 'muted small' }, c.applied ? '' : 'Nothing to learn: the prediction matched, or the mix used quick beans that aren\'t saved.'),
+      el('div', { class: 'row' },
+        !c.applied && ids.length ? el('button', { class: 'btn primary', type: 'button', onclick: function () { applyLearning(c, preview, 1); } }, 'Apply learning') : null,
+        c.applied ? el('button', { class: 'btn', type: 'button', onclick: function () { applyLearning(c, getDeltas(c), -1); } }, 'Undo learning') : null,
+        el('span', { class: 'spacer' }),
+        confirming ? el('span', { class: 'row tight' }, el('span', { class: 'small' }, c.applied ? 'Delete and keep the learning?' : 'Delete this entry?'),
+          el('button', { class: 'btn danger', type: 'button', onclick: async function () { state.confirm = null; try { await delDoc('cuppings', c.id); } catch (e) { /* shown */ } } }, 'Delete'),
+          el('button', { class: 'btn ghost', type: 'button', onclick: function () { state.confirm = null; render(); } }, 'Keep'))
+          : el('button', { class: 'btn ghost danger', type: 'button', onclick: function () { state.confirm = 'cup:' + c.id; render(); } }, 'Delete')));
+  }
+  async function applyLearning(c, deltas, sign) {
+    try {
+      var ids = Object.keys(deltas.attrs).concat(Object.keys(deltas.notes)).filter(function (v, i, a) { return a.indexOf(v) === i; });
+      for (var i = 0; i < ids.length; i++) {
+        var b = beanById(ids[i]);
+        if (!b) continue;
+        await patchDoc('beans', b.id, {
+          calib: E.applyCalib(b.calib, deltas.attrs[b.id] || {}, sign),
+          noteCalib: E.applyNoteCalib(b.noteCalib, deltas.notes[b.id] || {}, sign),
+          calibCount: Math.max(0, (b.calibCount || 0) + sign)
+        });
+      }
+      await patchDoc('cuppings', c.id, { applied: sign > 0, deltas: sign > 0 ? { attrs: deltas.attrs, notes: deltas.notes } : {} });
+      toast(sign > 0 ? 'Learning applied. The simulator now uses the corrected scores and notes.' : 'Learning undone.');
+    } catch (e) { /* shown */ }
+  }
+
+  // ---------------- Blends ----------------
+  function evalBlend(bl) {
+    var beans = (bl.rows || []).map(function (r, i) {
+      if (r.kind === 'saved') { var b = beanById(r.beanId); return b ? savedBean(b) : null; }
+      return { quick: true, name: r.name || 'Quick bean ' + (i + 1), species: r.species, roast: r.roast, process: r.process, varietal: r.varietal, originId: r.originId, cupScore: r.cupScore === '' ? null : r.cupScore, scores: r.scores, notes: parse(r.notesText).known };
+    });
+    if (beans.some(function (b) { return !b; })) return null;
+    return { beans: beans, ev: E.evaluateMix(beans, bl.pcts, { ranges: rangesFrom(bl.ranges), must: E.splitTerms(bl.mustText), mustNot: E.splitTerms(bl.notText) }, { brew: bl.brew, rules: rules(), index: noteIndex() }) };
+  }
+  function openBlend(bl, copy) {
+    sim.rows = (bl.rows || []).map(function (r) { return Object.assign({ min: '', max: '' }, r, { key: uid('r') }); });
+    sim.brew = bl.brew || 'filter'; sim.ranges = JSON.parse(JSON.stringify(bl.ranges || {})); sim.mustText = bl.mustText || ''; sim.notText = bl.notText || '';
+    TATTRS.forEach(function (a) { if (!sim.ranges[a]) sim.ranges[a] = ['', '']; });
+    sim.pcts = bl.pcts.slice(); sim.manual = true; sim.saveName = copy ? bl.name + ' (copy)' : bl.name;
+    sim.result = { best: { pcts: bl.pcts.slice() }, alternatives: [], reasons: [], searched: 0, ms: 0 };
+    sim.sig = simSig(); sim.cupping = null; saveSimDraft(); go('simulator');
+  }
+  function viewBlends() {
+    var parts = [el('h2', null, 'Saved blends')];
+    if (!state.blends.length) parts.push(el('div', { class: 'empty' }, el('p', null, 'No saved blends yet. Decide a ratio in the simulator, then save it with a name.')));
+    parts.push(el('div', { class: 'list' }, state.blends.map(function (bl) {
+      var r = evalBlend(bl);
+      var confirming = state.confirm === 'blend:' + bl.id;
+      return el('article', { class: 'card' },
+        el('div', { class: 'row' }, el('h3', null, bl.name), r ? statusPill(r.ev.status, r.ev.headline) : el('span', { class: 'pill fail' }, 'A bean was deleted'), el('span', { class: 'spacer' }), el('span', { class: 'muted small' }, dateStr(bl.createdAt))),
+        el('div', { class: 'mono', style: 'font-size:1.15rem;font-weight:600' }, bl.pcts.join(' : ')),
+        r ? legend(r.beans, bl.pcts) : null, ratioBar(bl.pcts),
+        el('p', { class: 'small muted' }, (E.BREWS[bl.brew] || E.BREWS.filter).label + ' · ' + (r ? r.ev.notes.summary : bl.summary || '')),
+        bl.reference ? consistencyBlock(bl, r) : null,
+        el('div', { class: 'row' },
+          el('button', { class: 'btn', type: 'button', onclick: function () { openBlend(bl, false); } }, 'Open in simulator'),
+          el('button', { class: 'btn', type: 'button', onclick: function () { openBlend(bl, true); } }, 'Duplicate'),
+          r ? el('button', { class: 'btn ghost', type: 'button', onclick: async function () {
+            var ref = { values: r.ev.values, must: r.ev.notes.notes.filter(function (n) { return n.tier === 'dominant' || n.tier === 'supporting'; }).map(function (n) { return n.label; }), setAt: Date.now() };
+            try { await patchDoc('blends', bl.id, { reference: ref }); toast(bl.name + ' is now a reference blend. Use it to check new batches and lots.'); } catch (e) { /* shown */ }
+          } }, bl.reference ? 'Update reference' : 'Set as reference') : null,
+          el('span', { class: 'spacer' }),
+          confirming ? el('span', { class: 'row tight' }, el('button', { class: 'btn danger', type: 'button', onclick: async function () { state.confirm = null; try { await delDoc('blends', bl.id); } catch (e) { /* shown */ } } }, 'Delete'),
+            el('button', { class: 'btn ghost', type: 'button', onclick: function () { state.confirm = null; render(); } }, 'Keep'))
+            : el('button', { class: 'btn ghost danger', type: 'button', onclick: function () { state.confirm = 'blend:' + bl.id; render(); } }, 'Delete')));
+    })));
+    if (state.blends.length >= 2) parts.push(compareCard());
+    return el('div', { class: 'stack' }, parts);
+  }
+  // ---------------- Lot consistency (reference, triangle test, re-match) ----------------
+  var tri = {}, rematch = {};
+  function refTarget(ref) { var t = E.referenceTarget({ values: ref.values, notes: { notes: [] } }); t.must = (ref.must || []).slice(); return t; }
+  function consistencyBlock(bl, r) {
+    var T = tri[bl.id], M = rematch[bl.id] || (rematch[bl.id] = { comp: 0, bean: '' });
+    var rows = bl.rows || [];
+    var hist = bl.triangles || [];
+    var allPicked = T && T.picks.length === T.plan.length && T.picks.every(function (p) { return p != null; });
+    var correct = allPicked ? T.plan.filter(function (rd, i) { return T.picks[i] === rd.odd; }).length : 0;
+    var verdict = allPicked ? E.triangleVerdict(correct, T.plan.length) : null;
+    return el('details', { class: 'consistency' },
+      el('summary', null, el('span', { class: 'pill ok' }, 'Reference blend'), ' Consistency checks', hist.length ? el('span', { class: 'muted small' }, ' · last triangle test: ' + (hist[hist.length - 1].different ? 'different' : 'matches')) : null),
+      el('div', { class: 'stack', style: 'margin-top:10px' },
+        el('p', { class: 'muted small' }, 'Reference profile: ' + TATTRS.map(function (a) { return AL[a].toLowerCase() + ' ' + nf(bl.reference.values[a], 1); }).join(', ') + '. Key notes: ' + ((bl.reference.must || []).join(', ') || 'none') + '.'),
+        el('h3', null, 'Triangle test: does a new batch match?'),
+        el('p', { class: 'small' }, 'Each round has 3 cups: 2 are the same coffee and 1 is different. Ask a helper to prepare and code the cups from the prep list, then pick the odd cup blind. If you can\'t reliably find it, the new batch matches the reference.'),
+        el('button', { class: 'btn', type: 'button', onclick: function () { tri[bl.id] = { plan: E.trianglePlan(3), picks: [null, null, null] }; render(); } }, T ? 'New triangle test' : 'Plan a triangle test (3 rounds)'),
+        T ? el('details', null, el('summary', { class: 'small' }, 'Prep list for the helper (don\'t look if you are cupping)'),
+          el('ul', { class: 'reasons small' }, T.plan.map(function (rd, i) {
+            return el('li', null, 'Round ' + (i + 1) + ': ' + rd.codes.map(function (c, k) { return c + ' = ' + (rd.samples[k] === 'ref' ? 'reference' : 'new batch'); }).join(', '));
+          }))) : null,
+        T ? el('div', { class: 'list' }, T.plan.map(function (rd, i) {
+          return el('div', { class: 'row small' }, el('b', null, 'Round ' + (i + 1)), el('span', { class: 'muted' }, 'Cups ' + rd.codes.join(' · ')),
+            el('select', { id: 'tri-' + bl.id + '-' + i, value: T.picks[i] == null ? '' : String(T.picks[i]), onchange: function (e) { T.picks[i] = e.target.value === '' ? null : Number(e.target.value); render(); } },
+              opt('', 'Odd cup is…'), rd.codes.map(function (c, k) { return opt(String(k), c); })));
+        })) : null,
+        verdict ? el('div', { class: 'row' }, el('span', { class: 'pill ' + (verdict.different ? 'fail' : 'ok') }, verdict.different ? '✕ Noticeably different' : '✓ Matches the reference'),
+          el('span', { class: 'small muted' }, correct + ' of ' + T.plan.length + ' correct (chance of guessing this well: ' + nf(verdict.p * 100, 0) + '%)'),
+          el('button', { class: 'btn ghost', type: 'button', onclick: async function () {
+            try { await patchDoc('blends', bl.id, { triangles: hist.concat([{ date: Date.now(), rounds: T.plan.length, correct: correct, different: verdict.different, p: verdict.p }]) }); delete tri[bl.id]; toast('Triangle test saved.'); } catch (e) { /* shown */ }
+          } }, 'Save result')) : null,
+        hist.length ? el('ul', { class: 'reasons small muted' }, hist.slice(-5).reverse().map(function (h) { return el('li', null, dateStr(h.date) + ': ' + h.correct + '/' + h.rounds + ' correct, ' + (h.different ? 'different' : 'matches')); })) : null,
+        el('h3', null, 'New lot from the roastery? Re-match the ratio'),
+        el('p', { class: 'small' }, 'Replace one component with the new lot (save it under My beans first). The simulator then finds the ratio that lands back on the reference profile.'),
+        el('div', { class: 'grid2' },
+          field('Replace', el('select', { id: 'rm-comp-' + bl.id, value: String(M.comp), onchange: function (e) { M.comp = Number(e.target.value); M.res = null; render(); } },
+            rows.map(function (rw, i) { var b = rw.kind === 'saved' ? beanById(rw.beanId) : null; return opt(String(i), (b ? b.name : rw.name || 'Bean ' + (i + 1)) + ' (' + bl.pcts[i] + '%)'); }))),
+          field('With', el('select', { id: 'rm-bean-' + bl.id, value: M.bean, onchange: function (e) { M.bean = e.target.value; M.res = null; render(); } },
+            opt('', 'Choose a saved bean…'), state.beans.map(function (b) { return opt(b.id, b.name); })))),
+        el('button', { class: 'btn', type: 'button', disabled: !M.bean || !r, onclick: function () {
+          var nb = beanById(M.bean); if (!nb || !r) return;
+          var beans = r.beans.slice(); beans[M.comp] = savedBean(nb);
+          M.res = E.solve(beans, refTarget(bl.reference), { brew: bl.brew, rules: rules(), index: noteIndex() });
+          M.beans = beans; render();
+        } }, 'Re-match ratio'),
+        M.res ? el('div', { class: 'alt' },
+          el('div', { class: 'row' }, statusPill(M.res.status, M.res.headline), el('span', { class: 'mono' }, 'Old ' + bl.pcts.join(' : ') + ' → new ' + (M.res.best ? M.res.best.pcts.join(' : ') : '—'))),
+          M.res.reasons.length ? el('ul', { class: 'reasons small' }, M.res.reasons.map(function (x) { return el('li', null, x); })) : el('p', { class: 'small' }, 'The new ratio lands inside the reference profile (±0,25 on each attribute, same key notes).'),
+          M.res.best ? el('button', { class: 'btn', type: 'button', onclick: function () {
+            var newRows = (bl.rows || []).map(function (rw, i) { return i === M.comp ? savedRow(M.bean) : Object.assign({ min: '', max: '' }, rw, { key: uid('r') }); });
+            openBlend(Object.assign({}, bl, { rows: newRows, pcts: M.res.best.pcts, name: bl.name + ' (new lot)' }), false);
+          } }, 'Open in simulator') : null) : null));
+  }
+  function compareCard() {
+    var ids = state.blends.map(function (b) { return b.id; });
+    state.cmp = (state.cmp || []).filter(function (id) { return ids.indexOf(id) >= 0; });
+    if (state.cmp.length < 2) state.cmp = [ids[0], ids[1]];
+    function pick(i) {
+      return el('select', { id: 'cmp-' + i, value: state.cmp[i], onchange: function (e) { state.cmp[i] = e.target.value; render(); } }, state.blends.map(function (b) { return opt(b.id, b.name); }));
+    }
+    var cols = state.cmp.map(function (id, i) {
+      var bl = state.blends.filter(function (b) { return b.id === id; })[0];
+      var r = bl && evalBlend(bl);
+      return el('div', { class: 'stack' }, pick(i),
+        r ? [statusPill(r.ev.status, r.ev.headline), el('div', { class: 'mono' }, bl.pcts.join(' : ') + ' · ' + (E.BREWS[bl.brew] || E.BREWS.filter).label),
+          el('div', { class: 'meters' }, TATTRS.map(function (a) { return meter(AL[a], r.ev.values[a], null); }),
+            meter('Balance', r.ev.form.balance), meter('Complexity', r.ev.form.complexity), meter('Finish', r.ev.form.finish)),
+          el('p', { class: 'small' }, r.ev.notes.summary)] : el('p', { class: 'muted small' }, 'Can\'t evaluate: a bean in this blend was deleted.'));
+    });
+    return el('section', { class: 'card', 'aria-labelledby': 'cmp-h' }, el('h3', { id: 'cmp-h' }, 'Compare two blends'), el('div', { class: 'cmp' }, cols));
+  }
+
+  // ---------------- Café spec sheet ----------------
+  function openSheetFromSim(ev) {
+    var beans = simBeans();
+    state.sheet = {
+      name: sim.saveName || 'Untitled blend', brew: sim.brew, pcts: sim.pcts.slice(),
+      beans: beans.map(function (b, i) {
+        var o = originById(b.originId);
+        return { name: b.name, share: sim.pcts[i], origin: o ? o.country + ', ' + o.region : '', process: procLabel(b.process), varietal: b.varietal && b.varietal !== 'unknown' ? E.VARIETALS[b.varietal].label : '',
+          producer: b.producer || '', altitude: b.altitude || (o ? o.altitude : ''), species: b.species, cupScore: b.cupScore };
+      }),
+      roast: E.roastColour(ev.values.roast), summary: ev.notes.summary,
+      notes: ev.notes.notes.filter(function (n) { return n.tier === 'dominant' || n.tier === 'supporting'; }).map(function (n) { return n.label; }),
+      values: ev.values, predicted: ev.predicted, acid: ev.acid.dominant ? E.ACID_TYPES[ev.acid.dominant].label : '',
+      recipe: E.recipeFor(sim.brew, ev.values.roast), roastDate: '', lang: '', translation: null
+    };
+    lsSet('rd.sheet.v1', state.sheet);
+    go('sheet');
+  }
+  function sheetRows(s) {
+    var r = s.recipe;
+    return {
+      components: s.beans.map(function (b) { return [b.share + '%', b.name, [b.origin, b.process, b.varietal, b.producer, b.altitude].filter(Boolean).join(' · ')]; }),
+      profile: TATTRS.map(function (a) { return [AL[a], nf(s.values[a], 1) + ' / 5']; }),
+      recipe: [['Dose', r.dose], ['Output', r.yield], ['Ratio', r.ratio], ['Water temp', r.temp], ['Time', r.time], ['Grind', r.grind]]
+    };
+  }
+  function restLine(s) {
+    if (!s.roastDate) return 'Best served ' + s.recipe.rest + '.';
+    var d = new Date(s.roastDate);
+    if (isNaN(d)) return 'Best served ' + s.recipe.rest + '.';
+    var m = /(\d+)–(\d+)/.exec(s.recipe.rest), from = new Date(d), to = new Date(d);
+    from.setDate(from.getDate() + Number(m[1])); to.setDate(to.getDate() + Number(m[2]));
+    return 'Roasted ' + dateStr(d) + '. Best served ' + dateStr(from) + ' to ' + dateStr(to) + ' (' + s.recipe.rest + ').';
+  }
+  function sheetHtml(s) {
+    var rows = sheetRows(s), t = s.translation;
+    function table(list) { return '<table>' + list.map(function (r) { return '<tr>' + r.map(function (c, i) { return (i ? '<td>' : '<th>') + esc(c) + (i ? '</td>' : '</th>'); }).join('') + '</tr>'; }).join('') + '</table>'; }
+    return '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>' + esc(s.name) + ' · spec sheet</title>' +
+      '<style>body{font:15px/1.5 system-ui,sans-serif;max-width:760px;margin:24px auto;padding:0 16px;color:#1d1a17}h1{font-family:Georgia,serif;margin:0}h2{font-size:14px;text-transform:uppercase;letter-spacing:.08em;color:#7a3e1d;margin:22px 0 6px}table{border-collapse:collapse;width:100%}th,td{text-align:left;padding:5px 8px;border-bottom:1px solid #ddd;vertical-align:top}.muted{color:#666;font-size:13px}.tag{display:inline-block;background:#f2e5db;color:#7a3e1d;border-radius:99px;padding:2px 10px;margin:2px;font-size:13px}</style></head><body>' +
+      '<h1>' + esc(s.name) + '</h1><p class="muted">' + esc(E.BREWS[s.brew].label) + ' · ' + esc(s.roast.name) + ' roast (Agtron ' + esc(s.roast.agtron) + ')' +
+      (s.predicted ? ' · estimated cup score ' + esc(nf(s.predicted.value, 1)) : '') + '</p>' +
+      '<p>' + s.notes.map(function (n) { return '<span class="tag">' + esc(n) + '</span>'; }).join('') + '</p><p>' + esc(s.summary) + (s.acid ? ' Acidity: ' + esc(s.acid) + '.' : '') + '</p>' +
+      (t && t.summary ? '<p><em>' + esc(t.summary) + '</em></p>' : '') +
+      '<h2>Components</h2>' + table(rows.components) + '<h2>Profile (as served)</h2>' + table(rows.profile) +
+      '<h2>Recipe: ' + esc(s.recipe.title) + '</h2>' + table(rows.recipe) + '<p>' + esc(s.recipe.extra) + '</p>' + (t && t.extra ? '<p><em>' + esc(t.extra) + '</em></p>' : '') +
+      '<p class="muted">Targets: ' + esc(s.recipe.targets) + '</p>' +
+      '<h2>Water and resting</h2><p>' + esc(s.recipe.water) + '</p>' + (t && t.water ? '<p><em>' + esc(t.water) + '</em></p>' : '') + '<p>' + esc(restLine(s)) + '</p>' +
+      '<p class="muted">The estimated cup score is calculated from component cup scores and is not an official SCA grade.</p></body></html>';
+  }
+  function viewSheet() {
+    var s = state.sheet || (state.sheet = lsGet('rd.sheet.v1'));
+    if (!s) return el('div', { class: 'stack' }, el('h2', null, 'Café spec sheet'),
+      el('div', { class: 'empty' }, el('p', null, 'Decide a ratio in the simulator, then press "Make a café spec sheet" on the recipe card. The sheet lists components, roast colour, notes, recipe, water and rest advice for café buyers.'),
+        el('button', { class: 'btn primary', type: 'button', onclick: function () { go('simulator'); } }, 'Go to the simulator')));
+    var rows = sheetRows(s), t = s.translation;
+    function save() { lsSet('rd.sheet.v1', s); }
+    function tbl(list) { return el('div', { class: 'tablewrap' }, el('table', null, el('tbody', null, list.map(function (r) { return el('tr', null, r.map(function (c, i) { return el(i ? 'td' : 'th', null, c); })); })))); }
+    return el('div', { class: 'stack' },
+      el('div', { class: 'row' }, el('h2', null, 'Café spec sheet'), el('span', { class: 'spacer' }),
+        el('button', { class: 'btn primary', type: 'button', onclick: async function () {
+          if (await saveFile(E.slug(s.name || 'blend') + '-spec-sheet.html', sheetHtml(s))) toast('Spec sheet saved.');
+        } }, 'Download sheet')),
+      el('section', { class: 'card' },
+        el('div', { class: 'grid4' },
+          field('Blend name', el('input', { type: 'text', id: 'sheet-name', value: s.name, oninput: function (e) { s.name = e.target.value; save(); } })),
+          field('Roast date (optional)', el('input', { type: 'date', id: 'sheet-date', value: s.roastDate || '', onchange: function (e) { s.roastDate = e.target.value; save(); render(); } }), 'Only used for rest advice'),
+          field('Second language', el('select', { id: 'sheet-lang', value: s.lang, onchange: function (e) { s.lang = e.target.value; s.translation = null; save(); render(); } },
+            opt('', 'English only'), opt('th', 'Thai (ภาษาไทย)'), opt('id', 'Bahasa Indonesia'))),
+          s.lang && state.sample && !state.aiHidden ? el('div', { class: 'field' }, el('span', null, ' '), el('button', { class: 'btn', type: 'button', disabled: s.busy, onclick: async function () {
+            s.busy = true; render();
+            try {
+              var res = await state.sample.json('Translate these coffee spec-sheet texts into ' + (s.lang === 'th' ? 'Thai' : 'Bahasa Indonesia') + ' for café buyers. Keep every number, unit and coffee term accurate; do not add claims. Reply with only JSON with the same keys.\n\n' +
+                JSON.stringify({ summary: s.summary, extra: s.recipe.extra, water: s.recipe.water }), { modelTier: 'quick' });
+              s.translation = res && typeof res === 'object' ? { summary: String(res.summary || '').slice(0, 600), extra: String(res.extra || '').slice(0, 600), water: String(res.water || '').slice(0, 800) } : null;
+              if (!s.translation) toast('The assistant didn\'t return a translation.', true);
+            } catch (e) { var m = aiError(e && e.code); if (m) toast(m, true); }
+            s.busy = false; save(); render();
+          } }, s.busy ? 'Translating…' : 'Translate with the assistant')) : el('span'))),
+      el('article', { class: 'card sheet' },
+        el('h2', null, s.name),
+        el('p', { class: 'muted small' }, E.BREWS[s.brew].label + ' · ' + s.roast.name + ' roast (Agtron ' + s.roast.agtron + ')' + (s.predicted ? ' · estimated cup score ' + nf(s.predicted.value, 1) : '')),
+        el('div', { class: 'chips' }, s.notes.map(function (n) { return el('span', { class: 'chip' }, n); })),
+        el('p', null, s.summary + (s.acid ? ' Acidity: ' + s.acid + '.' : '')), t && t.summary ? el('p', { class: 'small' }, el('em', null, t.summary)) : null,
+        el('span', { class: 'label' }, 'Components'), tbl(rows.components),
+        el('span', { class: 'label' }, 'Profile as served'), tbl(rows.profile),
+        el('span', { class: 'label' }, 'Recipe: ' + s.recipe.title), tbl(rows.recipe), el('p', { class: 'small' }, s.recipe.extra), t && t.extra ? el('p', { class: 'small' }, el('em', null, t.extra)) : null,
+        el('p', { class: 'small mono' }, 'Targets: ' + s.recipe.targets),
+        el('span', { class: 'label' }, 'Water and resting'), el('p', { class: 'small' }, s.recipe.water), t && t.water ? el('p', { class: 'small' }, el('em', null, t.water)) : null,
+        el('p', { class: 'small' }, restLine(s)),
+        el('p', { class: 'muted small' }, 'The estimated cup score is calculated from component cup scores and is not an official SCA grade.')));
+  }
+
+  // ---------------- Batches ----------------
+  function viewBatches() {
+    var parts = [el('h2', null, 'Batches')];
+    if (!state.batches.length) parts.push(el('div', { class: 'empty' }, el('p', null, 'No batches logged yet. In the simulator\'s Make it section, enter how many bags you are packing and log the batch. The grams come off your stock.')));
+    parts.push(el('div', { class: 'list' }, state.batches.map(function (t) {
+      return el('article', { class: 'card' + (t.undone ? ' muted' : '') },
+        el('div', { class: 'row' }, el('h3', null, t.blendName), t.undone ? el('span', { class: 'pill warn' }, 'Undone') : null, el('span', { class: 'spacer' }), el('span', { class: 'muted small' }, dateStr(t.createdAt))),
+        el('p', { class: 'small' }, (t.plan || []).map(function (p) { return p.count + ' × ' + bagLabel(p.bagG); }).join(' + ') + ' = ' + fmtKg(t.totalG || 0)),
+        el('div', { class: 'tablewrap' }, el('table', null, el('tbody', null, (t.items || []).map(function (it) { return el('tr', null, el('td', null, it.name), el('td', { class: 'num mono' }, (it.pct != null ? it.pct + '%' : '')), el('td', { class: 'num mono' }, fmtG(it.grams))); })))),
+        !t.undone ? el('div', { class: 'row' }, el('button', { class: 'btn', type: 'button', onclick: async function () {
+          try {
+            for (var i = 0; i < (t.items || []).length; i++) {
+              var b = beanById(t.items[i].beanId);
+              if (b) await patchDoc('beans', b.id, { stockG: (b.stockG || 0) + t.items[i].grams });
+            }
+            await patchDoc('batches', t.id, { undone: true });
+            toast('Batch undone. Stock restored.');
+          } catch (e) { /* shown */ }
+        } }, 'Undo and restore stock')) : null);
+    })));
+    return el('div', { class: 'stack' }, parts);
+  }
+
+  // ---------------- Origins (with process columns) ----------------
+  function procCell(o, p) {
+    var offered = E.offeredProcesses(o.process).indexOf(p) >= 0;
+    var s = E.scoresFor(o, 3, p);
+    return el('td', { class: 'proc-cell' + (offered ? '' : ' est'), title: offered ? 'Typical process for this origin' : 'Estimate: this origin is rarely sold with this process' },
+      el('div', { class: 'proc-scores' }, ATTRS.map(function (a) { return el('span', null, AL[a].charAt(0) + (a === 'bitterness' ? 'i' : '') + ' ', el('b', null, nf(s[a], 1))); })),
+      el('span', { class: 'small' }, offered ? '● typical' : 'estimate'));
+  }
+  function viewOrigins() {
+    var q = state.oq = state.oq || { text: '', species: '', country: '', process: '' };
+    var all = origins();
+    var countries = Array.from(new Set(all.map(function (o) { return o.country; }))).sort(function (a, b) { return a === 'Indonesia' ? -1 : b === 'Indonesia' ? 1 : a.localeCompare(b); });
+    var t = q.text.toLowerCase();
+    var list = all.filter(function (o) {
+      return (!q.species || o.species === q.species) && (!q.country || o.country === q.country) &&
+        (!q.process || E.offeredProcesses(o.process).indexOf(q.process) >= 0) &&
+        (!t || (o.country + ' ' + o.region + ' ' + o.notes + ' ' + o.process).toLowerCase().indexOf(t) >= 0);
+    });
+    var groups = {};
+    list.forEach(function (o) { (groups[o.country] = groups[o.country] || []).push(o); });
+    var counts = SPECIES.map(function (s) { return s + ' ' + all.filter(function (o) { return o.species === s; }).length; }).join(' · ');
+    return el('div', { class: 'stack' },
+      el('div', null, el('h2', null, 'Origin catalogue'), el('p', { class: 'muted small' }, all.length + ' origins · ' + counts + '. Scores are typical at medium roast (B body, A acidity, S sweetness, Bi bitterness). ● marks the processes an origin is usually sold in; other columns are estimates. Your own scores and cupping results override them.')),
+      el('div', { class: 'row' },
+        el('input', { type: 'search', id: 'o-q', placeholder: 'Search region, note or process', value: q.text, style: 'flex:2;min-width:180px', oninput: function (e) { q.text = e.target.value; render(); } }),
+        el('select', { id: 'o-sp', value: q.species, style: 'flex:1;min-width:120px', onchange: function (e) { q.species = e.target.value; render(); } }, opt('', 'All species'), SPECIES.map(function (s) { return opt(s, s); })),
+        el('select', { id: 'o-pr', value: q.process, style: 'flex:1;min-width:140px', onchange: function (e) { q.process = e.target.value; render(); } }, opt('', 'Any process'), PROCS.map(function (p) { return opt(p, procLabel(p)); })),
+        el('select', { id: 'o-c', value: q.country, style: 'flex:1;min-width:140px', onchange: function (e) { q.country = e.target.value; render(); } }, opt('', 'All countries'), countries.map(function (c) { return opt(c, c); }))),
+      el('div', { class: 'grid4 small muted' }, PROCS.map(function (p) { return el('span', null, el('b', null, procLabel(p) + ': '), E.PROCESSES[p].note); })),
+      list.length ? Object.keys(groups).sort(function (a, b) { return a === 'Indonesia' ? -1 : b === 'Indonesia' ? 1 : a.localeCompare(b); }).map(function (c) {
+        return el('section', { class: 'card' }, el('div', { class: 'row' }, el('h3', null, c), el('span', { class: 'muted small mono' }, groups[c].length)),
+          el('div', { class: 'tablewrap' }, el('table', { class: 'origins' },
+            el('thead', null, el('tr', null, el('th', null, 'Region'), PROCS.map(function (p) { return el('th', null, procLabel(p)); }), el('th', null, ''))),
+            el('tbody', null, groups[c].map(function (o) {
+              return el('tr', null,
+                el('td', { class: 'origin-cell' }, el('div', { class: 'row tight' }, el('b', null, o.region), speciesBadge(o.species)),
+                  el('div', { class: 'muted small' }, o.altitude), noteChips(o.notes)),
+                PROCS.map(function (p) { return procCell(o, p); }),
+                el('td', null, el('div', { class: 'stack', style: 'gap:6px' },
+                  el('button', { class: 'btn', type: 'button', onclick: function () { state.beanForm = blankBeanForm(o.id); go('beans'); } }, 'Add as my bean'),
+                  el('button', { class: 'btn ghost', type: 'button', onclick: function () {
+                    sim.rows = sim.rows.filter(function (r) { return !/^Example/.test(r.name || ''); });
+                    if (sim.rows.length >= 5) { toast('The mix already has 5 beans.', true); return; }
+                    sim.rows.push(quickRow(o.region, o.id, 3, o.notes)); clearMix(); saveSimDraft(); go('simulator');
+                  } }, 'Try in simulator'))));
+            })))));
+      }) : el('div', { class: 'empty' }, el('p', null, 'No origins match. Clear the search or filters.')));
+  }
+
+  // ---------------- Settings ----------------
+  function viewPrefs() {
+    var R = rules();
+    var draft = state.rulesDraft = state.rulesDraft || JSON.parse(JSON.stringify({ robustaCap: R.robustaCap, minPct: R.minPct, roastSpreadWarn: R.roastSpreadWarn, libericaWarnPct: R.libericaWarnPct, tiers: R.tiers, maskRatio: R.maskRatio }));
+    function num(id, val, set, attrs) { return el('input', Object.assign({ type: 'number', id: id, value: val, oninput: function (e) { var v = Number(e.target.value); if (isFinite(v)) set(v); } }, attrs || {})); }
+    var parts = [el('h2', null, 'Settings')];
+    parts.push(el('section', { class: 'card', 'aria-labelledby': 'rl-h' },
+      el('h3', { id: 'rl-h' }, 'Blending rules'),
+      el('div', { class: 'grid4' }, Object.keys(E.BREWS).map(function (k) { return field('Robusta max % · ' + E.BREWS[k].label.replace(' (with milk)', ''), num('rc-' + k, draft.robustaCap[k], function (v) { draft.robustaCap[k] = v; }, { min: 0, max: 100 })); })),
+      el('div', { class: 'grid4' },
+        field('Min share per bean (%)', num('r-min', draft.minPct, function (v) { draft.minPct = v; }, { min: 0, max: 20 })),
+        field('Warn when roast levels differ by more than', num('r-spread', draft.roastSpreadWarn, function (v) { draft.roastSpreadWarn = v; }, { min: 0, max: 4 })),
+        field('Warn when liberica/excelsa is above (%)', num('r-lib', draft.libericaWarnPct, function (v) { draft.libericaWarnPct = v; }, { min: 0, max: 100 })),
+        field('Masking ratio (bold vs delicate)', num('r-mask', draft.maskRatio, function (v) { draft.maskRatio = v; }, { min: 1, max: 10, step: 0.5 }))),
+      el('div', { class: 'grid4' },
+        field('Dominant from', num('t-dom', draft.tiers.dominant, function (v) { draft.tiers.dominant = v; }, { step: 0.01, min: 0 })),
+        field('Supporting from', num('t-sup', draft.tiers.supporting, function (v) { draft.tiers.supporting = v; }, { step: 0.01, min: 0 })),
+        field('Faint from', num('t-faint', draft.tiers.faint, function (v) { draft.tiers.faint = v; }, { step: 0.01, min: 0 }))),
+      el('div', { class: 'row' },
+        el('button', { class: 'btn primary', type: 'button', onclick: async function () { try { await saveSettings({ rules: draft }); state.rulesDraft = null; toast('Rules saved.'); } catch (e) { /* shown */ } } }, 'Save rules'),
+        el('button', { class: 'btn ghost', type: 'button', onclick: async function () { try { await saveSettings({ rules: {} }); state.rulesDraft = null; toast('Rules reset to defaults.'); } catch (e) { /* shown */ } } }, 'Reset to defaults'))));
+    parts.push(presetsCard(), notesWordsCard(), originsCard(), backupCard());
+    parts.push(el('section', { class: 'card', 'aria-labelledby': 'md-h' },
+      el('h3', { id: 'md-h' }, 'How the simulator thinks'),
+      el('ul', { class: 'reasons small' },
+        el('li', null, 'It tries every whole-percent ratio (about 1,5 million for 5 beans) and keeps the ones closest to your target as served.'),
+        el('li', null, 'Robusta pulls body and bitterness about 2× harder than its share, and liberica and excelsa about 1,4×. Darker roasts pull harder too, up to 1,3× at roast 5.'),
+        el('li', null, 'Process shifts the starting scores. Full wash adds acidity and clarity, semi wash (giling basah) adds body and lowers acidity, natural adds sweetness and body.'),
+        el('li', null, 'Bitterness above 3 hides acidity, and above 3,5 it hides sweetness. Sweet aromas (caramel, palm sugar, vanilla) lift perceived sweetness and bright fruit lifts perceived acidity, by up to 0,3 each.'),
+        el('li', null, 'Milk (kopi susu) takes 1 point off acidity and mutes delicate notes. Espresso adds body and bitterness. Tubruk adds body.'),
+        el('li', null, 'Bag notes are weighted by share, intensity, roast, brew and what your cuppings taught it. A delicate note is likely lost when bold notes are 3× stronger.'),
+        el('li', null, 'When several mixes hit your target, it prefers a clean verdict, better balance (pairings that work, no clashes, no single note drowning the rest) and ratios that still hold if your weighing is off by 2%.'),
+        el('li', null, 'Cupping entries correct each bean\'s scores by half the error, in proportion to its share, and make bag notes stronger or weaker based on what you tasted. It\'s a planning model, so always confirm at the cupping table.'))));
+    return el('div', { class: 'stack' }, parts);
+  }
+  function presetsCard() {
+    var mine = state.settings.customPresets || [];
+    return el('section', { class: 'card', 'aria-labelledby': 'ps-h' },
+      el('h3', { id: 'ps-h' }, 'My styles'),
+      el('p', { class: 'muted small' }, 'Targets you saved from the simulator with "Save as my style".'),
+      mine.length ? el('div', { class: 'list' }, mine.map(function (p) {
+        return el('div', { class: 'row' }, el('b', null, p.name), el('span', { class: 'muted small' }, (E.BREWS[p.brew] || E.BREWS.filter).label + (p.must ? ' · must taste ' + p.must : '')), el('span', { class: 'spacer' }),
+          el('button', { class: 'btn ghost', type: 'button', onclick: function () { applyPreset(p.id); go('simulator'); } }, 'Use'),
+          el('button', { class: 'btn ghost danger', type: 'button', onclick: async function () { try { await saveSettings({ customPresets: mine.filter(function (x) { return x.id !== p.id; }) }); } catch (e) { /* shown */ } } }, 'Remove'));
+      })) : el('p', { class: 'small muted' }, 'None yet.'));
+  }
+  function notesWordsCard() {
+    var cn = state.settings.customNotes || {};
+    return el('section', { class: 'card', 'aria-labelledby': 'cn-h' },
+      el('h3', { id: 'cn-h' }, 'My note words'),
+      el('p', { class: 'muted small' }, 'Words from bag labels that the tool didn\'t recognise, mapped to a flavour wheel family. Tap any unrecognised word (shown with a ?) to add it.'),
+      Object.keys(cn).length ? el('div', { class: 'list' }, Object.keys(cn).map(function (w) {
+        return el('div', { class: 'row' }, el('b', null, w), el('span', { class: 'muted small' }, LEX.families[cn[w].family] ? LEX.families[cn[w].family].label + ' · ' + cn[w].intensity : cn[w].family),
+          el('span', { class: 'spacer' }), el('button', { class: 'btn ghost danger', type: 'button', onclick: async function () {
+            var next = Object.assign({}, cn); delete next[w];
+            try { await saveSettings({ customNotes: next }); } catch (e) { /* shown */ }
+          } }, 'Remove'));
+      })) : el('p', { class: 'small muted' }, 'None yet.'),
+      el('button', { class: 'btn', type: 'button', onclick: function () { openMapper(''); } }, '+ Add a word'));
+  }
+  function originsCard() {
+    var mine = state.settings.customOrigins || [];
+    var f = state.originForm;
+    return el('section', { class: 'card', 'aria-labelledby': 'og-h' },
+      el('h3', { id: 'og-h' }, 'My origins'),
+      el('p', { class: 'muted small' }, 'Add a farm, region or lot that isn\'t in the catalogue. It then appears in every origin list and in the bean picker.'),
+      mine.length ? el('div', { class: 'list' }, mine.map(function (o) {
+        return el('div', { class: 'row' }, el('b', null, o.region), el('span', { class: 'muted small' }, o.country + ' · ' + o.species + ' · ' + o.process), el('span', { class: 'spacer' }),
+          el('button', { class: 'btn ghost danger', type: 'button', onclick: async function () { try { await saveSettings({ customOrigins: mine.filter(function (x) { return x.id !== o.id; }) }); } catch (e) { /* shown */ } } }, 'Remove'));
+      })) : null,
+      f ? el('div', { class: 'stack' },
+        el('div', { class: 'grid2' },
+          field('Country', el('input', { type: 'text', id: 'og-country', value: f.country, oninput: function (e) { f.country = e.target.value; } })),
+          field('Region or farm', el('input', { type: 'text', id: 'og-region', value: f.region, oninput: function (e) { f.region = e.target.value; } }))),
+        el('div', { class: 'grid4' },
+          field('Species', el('select', { id: 'og-sp', value: f.species, onchange: function (e) { f.species = e.target.value; } }, SPECIES.map(function (s) { return opt(s, s); }))),
+          field('Main process', processSelect('og-proc', f.proc, function (e) { f.proc = e.target.value; })),
+          field('Altitude', el('input', { type: 'text', id: 'og-alt', value: f.altitude, placeholder: 'e.g. 1.300–1.600 m', oninput: function (e) { f.altitude = e.target.value; } }))),
+        el('div', { class: 'grid4' }, ATTRS.map(function (a) { return field(AL[a] + ' (1–5)', el('input', { type: 'number', id: 'og-' + a, min: 1, max: 5, step: 0.5, value: f.scores[a], oninput: function (e) { var v = Number(e.target.value); if (v >= 1 && v <= 5) f.scores[a] = v; } })); })),
+        field('Typical notes', el('input', { type: 'text', id: 'og-notes', value: f.notes, oninput: function (e) { f.notes = e.target.value; } })),
+        el('div', { class: 'row' },
+          el('button', { class: 'btn primary', type: 'button', onclick: async function () {
+            if (!f.region.trim() || !f.country.trim()) { toast('Fill in the country and region.', true); return; }
+            var procText = { full: 'Washed', semi: 'Wet-hulled', natural: 'Natural' }[f.proc];
+            var o = { id: 'my-' + E.slug(f.region) + '-' + Date.now().toString(36), country: f.country.trim(), region: f.region.trim(), species: f.species, process: procText, altitude: f.altitude || '', scores: f.scores, notes: f.notes || '' };
+            try { await saveSettings({ customOrigins: mine.concat([o]) }); state.originForm = null; toast('Added ' + o.region + '.'); } catch (e) { /* shown */ }
+          } }, 'Save origin'),
+          el('button', { class: 'btn ghost', type: 'button', onclick: function () { state.originForm = null; render(); } }, 'Cancel')))
+        : el('button', { class: 'btn', type: 'button', onclick: function () { state.originForm = { country: 'Indonesia', region: '', species: 'arabica', proc: 'full', altitude: '', scores: { body: 3, acidity: 3, sweetness: 3, bitterness: 2.5 }, notes: '' }; render(); } }, '+ Add an origin'));
+  }
+  function mapperCard() {
+    var m = state.mapper;
+    return el('section', { class: 'card', 'aria-labelledby': 'mp-h', style: 'border-color:var(--accent);margin-bottom:14px' },
+      el('h3', { id: 'mp-h' }, m.word ? 'What is "' + m.word + '"?' : 'Add a note word'),
+      el('div', { class: 'grid4' },
+        field('Word', el('input', { type: 'text', id: 'mp-word', value: m.word, oninput: function (e) { m.word = e.target.value; } })),
+        field('Flavour wheel family', el('select', { id: 'mp-fam', value: m.family, onchange: function (e) { m.family = e.target.value; } }, Object.keys(LEX.families).map(function (f) { return opt(f, LEX.families[f].label); }))),
+        field('Intensity', el('select', { id: 'mp-int', value: m.intensity, onchange: function (e) { m.intensity = e.target.value; } }, ['delicate', 'medium', 'bold'].map(function (i) { return opt(i, i); })))),
+      m.suggestion ? el('p', { class: 'small' }, 'Assistant suggests: ' + m.suggestion) : null,
+      el('div', { class: 'row' },
+        el('button', { class: 'btn primary', type: 'button', onclick: async function () {
+          var w = (m.word || '').trim().toLowerCase();
+          if (!w) { toast('Type the word first.', true); return; }
+          var next = Object.assign({}, state.settings.customNotes || {});
+          next[w] = { family: m.family, sub: m.family, intensity: m.intensity };
+          try { await saveSettings({ customNotes: next }); state.mapper = null; toast('"' + w + '" is now recognised.'); render(); } catch (e) { /* shown */ }
+        } }, 'Save word'),
+        state.sample && !state.aiHidden && m.word ? el('button', { class: 'btn', type: 'button', disabled: m.busy, onclick: async function () {
+          m.busy = true; render();
+          try {
+            var res = await state.sample.json('A coffee bag label lists the tasting note "' + m.word + '" (it may be Indonesian or English). Classify it on the SCA Coffee Taster\'s Flavor Wheel. Reply with only JSON like {"family":"fruity","intensity":"medium","meaning":"jackfruit"} where family is one of ' + Object.keys(LEX.families).join(', ') + ' and intensity is delicate, medium or bold.', { modelTier: 'quick' });
+            if (res && LEX.families[res.family]) { m.family = res.family; if (['delicate', 'medium', 'bold'].indexOf(res.intensity) >= 0) m.intensity = res.intensity; m.suggestion = LEX.families[res.family].label + ', ' + m.intensity + (res.meaning ? ' (' + String(res.meaning).slice(0, 60) + ')' : '') + '. Check it, then save.'; }
+            else m.suggestion = 'No clear answer. Pick the family yourself.';
+          } catch (e) { m.suggestion = aiError(e && e.code) || 'No answer.'; }
+          m.busy = false; render();
+        } }, m.busy ? 'Asking…' : 'Ask the assistant') : null,
+        el('button', { class: 'btn ghost', type: 'button', onclick: function () { state.mapper = null; render(); } }, 'Cancel')));
+  }
+  function backupCard() {
+    var imp = state.importPreview;
+    return el('section', { class: 'card', 'aria-labelledby': 'bk-h' },
+      el('h3', { id: 'bk-h' }, 'Backup'),
+      el('p', { class: 'muted small' }, 'Save a copy of your beans, blends, batches, cupping log and settings as a file, or bring one back.'),
+      el('div', { class: 'row' },
+        el('button', { class: 'btn', type: 'button', onclick: async function () {
+          var data = { app: 'ratio-decider', version: 2, exportedAt: new Date().toISOString(), beans: state.beans, blends: state.blends, batches: state.batches, cuppings: state.cuppings, settings: state.settings };
+          if (await saveFile('ratio-decider-backup-' + new Date().toISOString().slice(0, 10) + '.json', JSON.stringify(data, null, 2))) toast('Backup saved.');
+        } }, 'Download backup'),
+        el('label', { class: 'btn' }, 'Restore from file', el('input', { type: 'file', accept: 'application/json,.json', hidden: true, onchange: function (e) {
+          var file = e.target.files && e.target.files[0];
+          if (!file) return;
+          var reader = new FileReader();
+          reader.onload = function () {
+            try {
+              var d = JSON.parse(reader.result);
+              if (!d || d.app !== 'ratio-decider') throw new Error('not a backup');
+              state.importPreview = d; render();
+            } catch (err) { toast('That file isn\'t a Ratio Decider backup.', true); }
+          };
+          reader.readAsText(file);
+        } }))),
+      imp ? el('div', { class: 'stack', style: 'gap:8px' },
+        el('p', { class: 'small' }, 'Restore ' + (imp.beans || []).length + ' beans, ' + (imp.blends || []).length + ' blends, ' + (imp.batches || []).length + ' batches and ' + (imp.cuppings || []).length + ' cupping entries? Items with the same ID are replaced; everything else stays.'),
+        el('div', { class: 'row' },
+          el('button', { class: 'btn primary', type: 'button', onclick: async function () {
+            var d = state.importPreview; state.importPreview = null;
+            try {
+              for (var c = 0; c < COLS.length; c++) {
+                var list = Array.isArray(d[COLS[c]]) ? d[COLS[c]] : [];
+                for (var i = 0; i < list.length; i++) if (list[i] && typeof list[i].id === 'string' && /^[A-Za-z0-9_\-.~:@+]{1,120}$/.test(list[i].id)) await putDoc(COLS[c], list[i].id, strip(list[i]));
+              }
+              if (d.settings && typeof d.settings === 'object') await saveSettings(d.settings);
+              toast('Backup restored.');
+            } catch (e) { /* shown */ }
+            render();
+          } }, 'Restore'),
+          el('button', { class: 'btn ghost', type: 'button', onclick: function () { state.importPreview = null; render(); } }, 'Cancel'))) : null);
+  }
+
+  // ---------------- boot ----------------
+  state.route = routeFromHash();
+  render();
+  setTimeout(function () { if (!sim.result && simReady()) runSolve(); }, 60);
+  initStore().then(render, function () { state.mode = 'memory'; render(); });
+})();

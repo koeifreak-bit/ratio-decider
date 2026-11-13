@@ -1,0 +1,389 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Ratio Decider tests</title>
+<style>
+  body { font: 14px/1.5 system-ui, sans-serif; margin: 24px; background: #fff; color: #111; }
+  .pass { color: #1a7f37; } .fail { color: #b42318; font-weight: 600; }
+  #summary { font-size: 18px; font-weight: 700; margin-bottom: 12px; }
+  li { margin: 2px 0; } code { background: #f2f2f2; padding: 0 4px; }
+</style>
+</head>
+<body>
+<div id="summary">Running…</div>
+<ul id="out"></ul>
+<script src="lexicon.js"></script>
+<script src="origins.js"></script>
+<script src="engine.js"></script>
+<script>
+(function () {
+  var E = window.RatioEngine, out = document.getElementById('out');
+  var idx = E.buildIndex(window.RD_LEXICON, {});
+  var passed = 0, failed = 0;
+  function log(ok, name, detail) {
+    var li = document.createElement('li');
+    li.className = ok ? 'pass' : 'fail';
+    li.textContent = (ok ? 'PASS ' : 'FAIL ') + name + (detail ? ' — ' + detail : '');
+    out.appendChild(li);
+    ok ? passed++ : failed++;
+  }
+  function test(name, fn) {
+    try { var r = fn(); if (r === true || r === undefined) log(true, name); else log(false, name, String(r)); }
+    catch (e) { log(false, name, e && e.message ? e.message : String(e)); }
+  }
+  function eq(a, b, msg) { if (JSON.stringify(a) !== JSON.stringify(b)) throw new Error((msg || '') + ' expected ' + JSON.stringify(b) + ' got ' + JSON.stringify(a)); }
+  function near(a, b, eps, msg) { if (Math.abs(a - b) > (eps || 1e-6)) throw new Error((msg || '') + ' expected ' + b + ' got ' + a); }
+  function ok(c, msg) { if (!c) throw new Error(msg || 'assertion failed'); }
+  function bean(o) {
+    var b = Object.assign({ species: 'arabica', roast: 3, scores: { body: 3, acidity: 3, sweetness: 3, bitterness: 3 }, notesText: '' }, o);
+    b.scores = Object.assign({ body: 3, acidity: 3, sweetness: 3, bitterness: 3 }, o.scores || {});
+    b.notes = E.parseNotes(b.notesText, idx).known;
+    return b;
+  }
+  function note(sim, label) { return sim.notes.filter(function (n) { return n.label === label; })[0]; }
+
+  // ---- data integrity ----
+  test('Origins: catalogue size and Indonesia depth', function () {
+    ok(RD_ORIGINS.length >= 120, 'only ' + RD_ORIGINS.length);
+    ok(RD_ORIGINS.filter(function (o) { return o.country === 'Indonesia'; }).length >= 40, 'Indonesia < 40');
+    ok(RD_ORIGINS.some(function (o) { return o.species === 'robusta'; }) && RD_ORIGINS.some(function (o) { return o.species === 'liberica'; }));
+  });
+  test('Origins: every typical note is recognised', function () {
+    var bad = [];
+    RD_ORIGINS.forEach(function (o) { var p = E.parseNotes(o.notes, idx); if (p.unknown.length) bad.push(o.id + ': ' + p.unknown.join('|')); });
+    eq(bad, []);
+  });
+  test('Origins: unique ids', function () {
+    var seen = {}; RD_ORIGINS.forEach(function (o) { ok(!seen[o.id], 'dup ' + o.id); seen[o.id] = 1; });
+  });
+
+  // ---- SC1 exact ratio ----
+  test('SC1 exact ratio 67/33 for body 3.0', function () {
+    var r = E.solve([bean({ name: 'A', scores: { body: 2 } }), bean({ name: 'B', scores: { body: 5 } })],
+      { ranges: { body: [3, 3] } }, { brew: 'filter', index: idx });
+    eq(r.best.pcts, [67, 33]);
+    near(r.best.values.body, 2.99, 1e-6);
+  });
+  // ---- SC2 ----
+  test('SC2 unreachable acidity names acidity and 3.0', function () {
+    var r = E.solve([bean({ name: 'A', scores: { acidity: 1 } }), bean({ name: 'B', scores: { acidity: 2 } }), bean({ name: 'C', scores: { acidity: 3 } })],
+      { ranges: { acidity: [4, null] } }, { brew: 'filter', index: idx });
+    eq(r.status, 'fail');
+    ok(r.best && r.best.pcts, 'closest mix missing');
+    var txt = r.reasons.join(' ');
+    ok(/Acidity/.test(txt) && /3,0/.test(txt), txt);
+  });
+  // ---- SC3 ----
+  test('SC3 Filter with only robusta is not possible', function () {
+    var r = E.solve([bean({ name: 'R1', species: 'robusta' }), bean({ name: 'R2', species: 'robusta' })], {}, { brew: 'filter', index: idx });
+    eq(r.status, 'fail');
+    ok(/robusta limit 10%/i.test(r.reasons.join(' ')), r.reasons.join(' '));
+  });
+  // ---- SC4 ----
+  test('SC4 roast spread warning', function () {
+    var r = E.solve([bean({ name: 'L', roast: 1 }), bean({ name: 'D', roast: 5 })], {}, { brew: 'filter', index: idx });
+    eq(r.status, 'warn');
+    ok(/Roast levels run from 1 to 5/.test(r.warnings.join(' ')));
+  });
+  // ---- SC5 masking ----
+  test('SC5 delicate notes masked by bold ones', function () {
+    var bs = [bean({ name: 'A', roast: 2, notesText: 'jasmine, bergamot' }), bean({ name: 'B', roast: 4, notesText: 'dark chocolate, smoky' })];
+    var sim = E.simulateNotes(bs, [20, 80], 'filter');
+    eq(note(sim, 'Dark chocolate').tier, 'dominant');
+    eq(note(sim, 'Smoky').tier, 'dominant');
+    eq(note(sim, 'Jasmine').tier, 'lost');
+    eq(note(sim, 'Bergamot').tier, 'lost');
+    var ev = E.evaluateMix(bs, [20, 80], {}, { brew: 'filter', index: idx });
+    ok(/Likely lost in the cup: jasmine and bergamot/.test(ev.warnings.join(' ')), ev.warnings.join(' | '));
+    eq(ev.status, 'warn');
+  });
+  // ---- SC6 ----
+  test('SC6 shared notes reinforce', function () {
+    var sim = E.simulateNotes([bean({ notesText: 'caramel' }), bean({ notesText: 'caramel, hazelnut' })], [50, 50], 'filter');
+    near(note(sim, 'Caramel').strength, 1.0); near(note(sim, 'Hazelnut').strength, 0.5);
+    eq(sim.notes[0].label, 'Caramel');
+  });
+  // ---- SC7 ----
+  test('SC7 Indonesian notes, unknown and ignored words', function () {
+    var p = E.parseNotes('gula aren, rempah, nangka, xyz, balanced', idx);
+    eq(p.known.map(function (n) { return n.label + '/' + n.family; }), ['Palm sugar/sweet', 'Spice/spices', 'Jackfruit/fruity']);
+    eq(p.unknown, ['xyz']); eq(p.ignored, ['balanced']);
+  });
+  test('Parser: compound phrases and longest match', function () {
+    var p = E.parseNotes('Dark chocolate & orange zest; hints of ripe mango and kayu manis', idx);
+    eq(p.known.map(function (n) { return n.label; }), ['Dark chocolate', 'Orange', 'Mango', 'Cinnamon']);
+  });
+  // ---- SC8 ----
+  test('SC8 must-taste citrus reachable', function () {
+    var r = E.solve([bean({ name: 'Cit', roast: 2, notesText: 'orange' }), bean({ name: 'Choc', notesText: 'chocolate' })],
+      { must: ['citrus'] }, { brew: 'filter', index: idx });
+    ok(r.status !== 'fail', r.reasons.join(' '));
+    ok(r.best.must[0].strength >= 0.15, 'citrus ' + r.best.must[0].strength);
+  });
+  test('SC8 citrus only from robusta capped at 10% → not possible', function () {
+    var r = E.solve([bean({ name: 'RobCit', species: 'robusta', roast: 2, notesText: 'orange' }), bean({ name: 'Choc', notesText: 'chocolate' })],
+      { must: ['citrus'] }, { brew: 'filter', index: idx });
+    eq(r.status, 'fail');
+    ok(/Citrus/.test(r.reasons.join(' ')) && /capped at 10%/.test(r.reasons.join(' ')), r.reasons.join(' '));
+  });
+  test('Must-not-taste earthy pushes earthy bean down', function () {
+    var r = E.solve([bean({ name: 'Earth', notesText: 'earthy' }), bean({ name: 'Clean', notesText: 'caramel' })],
+      { mustNot: ['earthy'] }, { brew: 'filter', index: idx });
+    ok(r.status !== 'fail', r.reasons.join(' '));
+    ok(r.best.mustNot[0].strength < 0.15, 'earthy ' + r.best.mustNot[0].strength);
+  });
+  // ---- SC10 / SC11 ----
+  test('SC10 weigh-out', function () {
+    eq(E.weighOut([31, 69], 1000), [310, 690]);
+    eq(E.weighOut([33, 33, 34], 250), [83, 83, 84]);
+    eq(E.weighOut([31, 69], 250), [78, 172]);
+  });
+  test('SC11 max bags + limiting bean', function () {
+    var m = E.maxBags([50, 30, 20], 250, [3000, 600, 2000]);
+    eq(m.bags, 8); eq(m.limiting, 1);
+  });
+  test('Plan weigh-out totals', function () {
+    var p = E.planWeighOut([31, 69], [{ bagG: 250, count: 20 }, { bagG: 1000, count: 5 }]);
+    eq(p.perBean, [78 * 20 + 310 * 5, 172 * 20 + 690 * 5]); eq(p.totalG, 10000);
+  });
+  // ---- SC12 speed ----
+  test('SC12 5-bean solve within 2 s', function () {
+    var names = ['id-gayo', 'id-kintamani', 'id-lampung', 'id-toraja', 'et-guji'];
+    var bs = names.map(function (id) {
+      var o = RD_ORIGINS.filter(function (x) { return x.id === id; })[0];
+      return bean({ name: id, species: o.species, scores: o.scores, notesText: o.notes });
+    });
+    var r = E.solve(bs, { ranges: { body: [3.5, 4.5], acidity: [2.5, 3.5] }, must: ['chocolate'] }, { brew: 'espresso', index: idx });
+    ok(r.searched > 1000000, 'searched ' + r.searched);
+    ok(r.ms <= 2000, r.ms + ' ms');
+    return true;
+  });
+  // ---- SC16–18 Q-grader model ----
+  test('SC16 robusta pulls bitterness to 2.83', function () {
+    var v = E.profile([bean({ scores: { bitterness: 2 } }), bean({ species: 'robusta', scores: { bitterness: 4.5 } })], [80, 20], 'filter');
+    near(v.bitterness, 2.8333, 1e-3);
+  });
+  test('SC17 kopi susu lowers acidity and delicate notes', function () {
+    var v = E.profile([bean({})], [100], 'kopisusu');
+    near(v.acidity, 2.0);
+    var j = bean({ roast: 2, notesText: 'jasmine' });
+    near(E.simulateNotes([j], [100], 'filter').notes[0].strength, 0.6);
+    near(E.simulateNotes([j], [100], 'kopisusu').notes[0].strength, 0.24);
+  });
+  test('SC18 bitterness masks acidity', function () {
+    near(E.profile([bean({ scores: { bitterness: 4, acidity: 3 } })], [100], 'filter').acidity, 2.6);
+  });
+  // ---- SC19 cupping ----
+  test('SC19 cupping plan grams, codes and protocol', function () {
+    var plan = E.cuppingPlan([{ pcts: [31, 69] }, { pcts: [40, 60] }, { pcts: [25, 75] }], { brew: 'espresso' });
+    eq(plan.samples[0].grams, [18.6, 41.4]);
+    eq(plan.samples.length, 3);
+    var codes = plan.samples.map(function (s) { return s.code; });
+    ok(codes.every(function (c) { return /^\d{3}$/.test(c); }) && new Set(codes).size === 3, codes.join(','));
+    eq([plan.cups, plan.doseG, plan.waterMl], [5, 8.25, 150]);
+    ok(/Espresso/.test(plan.brewNote));
+  });
+  // ---- SC20 calibration ----
+  test('SC20 calibration single bean +0.5 and undo', function () {
+    var b = bean({ id: 'b1' });
+    var d = E.calibrate([b], [100], { body: 3 }, { body: 4 });
+    eq(d, { b1: { body: 0.5 } });
+    var c = E.applyCalib({}, d.b1, 1); eq(c, { body: 0.5 });
+    eq(E.applyCalib(c, d.b1, -1), {});
+  });
+  test('SC20 calibration split by share', function () {
+    var d = E.calibrate([bean({ id: 'a' }), bean({ id: 'b' })], [50, 50], { acidity: 3 }, { acidity: 2 });
+    eq(d, { a: { acidity: -0.25 }, b: { acidity: -0.25 } });
+  });
+  test('Calibration skips quick beans and clamps to 1–5', function () {
+    var d = E.calibrate([bean({ id: 'q', quick: true }), bean({ id: 'k', scores: { body: 5 } })], [50, 50], { body: 3 }, { body: 5 });
+    eq(d, {});
+  });
+  // ---- SC21 defect ----
+  test('SC21 defect note warns', function () {
+    var ev = E.evaluateMix([bean({ name: 'Lot 7', notesText: 'rubbery, chocolate' })], [100], {}, { brew: 'filter', index: idx });
+    ok(/Possible defect: "rubber" from Lot 7/.test(ev.warnings.join(' ')), ev.warnings.join(' | '));
+  });
+  // ---- misc ----
+  test('Rebalance keeps 100 and proportions', function () {
+    eq(E.rebalance([50, 30, 20], 0, 60), [60, 24, 16]);
+    eq(E.rebalance([50, 50], 1, 31), [69, 31]);
+    eq(E.rebalance([100, 0, 0], 0, 40), [40, 30, 30]);
+  });
+  test('Roast-adjusted default scores', function () {
+    eq(E.scoresForRoast({ body: 3, acidity: 3, sweetness: 3, bitterness: 3 }, 5), { body: 3.4, acidity: 2.2, sweetness: 3, bitterness: 4 });
+  });
+  test('Single bean solve gives 100%', function () {
+    eq(E.solve([bean({ name: 'Solo' })], {}, { brew: 'filter', index: idx }).best.pcts, [100]);
+  });
+  test('Per-bean min/max respected', function () {
+    var r = E.solve([bean({ name: 'A', scores: { body: 2 } }), bean({ name: 'B', scores: { body: 5 } })],
+      { ranges: { body: [3, 3] } }, { brew: 'filter', index: idx, limits: [{ min: 0, max: 60 }, {}] });
+    eq(r.best.pcts, [60, 40]);
+  });
+  test('Alternatives are distinct by 5+ points', function () {
+    var r = E.solve([bean({ name: 'A', scores: { body: 2 } }), bean({ name: 'B', scores: { body: 5 } })], { ranges: { body: [3, 4] } }, { brew: 'filter', index: idx });
+    ok(r.alternatives.length === 2, 'alts ' + r.alternatives.length);
+    r.alternatives.forEach(function (a) { ok(Math.abs(a.pcts[0] - r.best.pcts[0]) >= 5); });
+  });
+  test('Custom note mapping', function () {
+    var i2 = E.buildIndex(RD_LEXICON, { 'kopi luwak-ish': { family: 'other', sub: 'earthy', intensity: 'bold' } });
+    eq(E.parseNotes('kopi luwak-ish', i2).known[0].family, 'other');
+  });
+
+  // ---- v5: smarter simulator ----
+  test('SC22 picker finds the right pair and ratio', function () {
+    var cands = [
+      bean({ id: 'A', name: 'A', scores: { body: 2, acidity: 3 } }), bean({ id: 'B', name: 'B', scores: { body: 5, acidity: 3 } }),
+      bean({ id: 'C', name: 'C', scores: { body: 1, acidity: 1 } }), bean({ id: 'D', name: 'D', scores: { body: 1, acidity: 5 } })
+    ];
+    var r = E.pickBeans(cands, { ranges: { body: [3, 3], acidity: [2.5, 3.5] } }, { brew: 'filter', index: idx, maxBeans: 2 });
+    eq(r.picks[0].beans.map(function (b) { return b.name; }), ['A', 'B']);
+    eq(r.picks[0].result.best.pcts, [67, 33]);
+  });
+  test('SC22b picker over the whole catalogue (kopi susu preset) is fast and useful', function () {
+    var p = E.PRESETS.filter(function (x) { return x.id === 'kopisusu-aren'; })[0];
+    var ranges = {}; Object.keys(p.ranges).forEach(function (a) { ranges[a] = p.ranges[a].map(function (v) { return v === '' ? null : Number(v); }); });
+    var cands = RD_ORIGINS.map(function (o) { return bean({ name: o.region, species: o.species, roast: 4, scores: E.scoresForRoast(o.scores, 4), notesText: o.notes }); });
+    var r = E.pickBeans(cands, { ranges: ranges, must: E.splitTerms(p.must), mustNot: E.splitTerms(p.mustNot) }, { brew: p.brew, index: idx, maxBeans: 3 });
+    ok(r.ms < 4000, r.ms + ' ms');
+    ok(r.picks.length >= 3, 'picks ' + r.picks.length);
+    ok(r.picks[0].result.status !== 'fail', r.picks[0].result.reasons.join(' '));
+  });
+  test('SC23 pairing synergy and clash', function () {
+    var ev = E.evaluateMix([bean({ name: 'X', notesText: 'dark chocolate, orange' })], [100], {}, { brew: 'filter', index: idx });
+    ok(ev.pairings.synergies.some(function (s) { return s.name === 'Chocolate and orange'; }), JSON.stringify(ev.pairings));
+    var ev2 = E.evaluateMix([bean({ name: 'F', roast: 1, notesText: 'jasmine' }), bean({ name: 'S', notesText: 'smoky' })], [50, 50], {}, { brew: 'filter', index: idx });
+    ok(ev2.pairings.clashes.some(function (c) { return c.name === 'Smoke over flowers' && c.strong; }));
+    ok(/Flavour clash, smoke over flowers/.test(ev2.warnings.join(' ')), ev2.warnings.join(' | '));
+    eq(ev2.status, 'warn');
+  });
+  test('SC24 sweet aromatics nudge perceived sweetness', function () {
+    near(E.profile([bean({ notesText: 'caramel' })], [100], 'filter').sweetness, 3.25);
+    near(E.profile([bean({ notesText: '' })], [100], 'filter').sweetness, 3);
+  });
+  test('SC25 robustness to ±2% weighing error', function () {
+    var bs = [bean({ name: 'A', scores: { body: 2 } }), bean({ name: 'B', scores: { body: 5 } })];
+    ok(E.evaluateMix(bs, [67, 33], { ranges: { body: [3, 3] } }, { index: idx }).robust <= 0.5);
+    eq(E.evaluateMix(bs, [50, 50], { ranges: { body: [2.5, 4] } }, { index: idx }).robust, 1);
+  });
+  test('SC26 rounder ratio offered when just as good', function () {
+    var r = E.solve([bean({ name: 'A', scores: { body: 2 } }), bean({ name: 'B', scores: { body: 5 } })], { ranges: { body: [2.95, 3.05] } }, { brew: 'filter', index: idx });
+    ok(r.round, 'no round option');
+    eq(r.round.pcts, [65, 35]);
+  });
+  test('SC27 use-up mode maximises the chosen bean', function () {
+    var bs = [bean({ name: 'A', scores: { body: 2 } }), bean({ name: 'B', scores: { body: 5 } })];
+    var r = E.solve(bs, { ranges: { body: [2.5, 4] } }, { brew: 'filter', index: idx, mode: 'useup', useIdx: 1 });
+    eq(r.best.pcts, [34, 66]);
+  });
+  test('SC27b stock mode makes more bags than taste mode', function () {
+    var bs = [bean({ name: 'A', scores: { body: 2 }, stockG: 1000 }), bean({ name: 'B', scores: { body: 5 }, stockG: 100 })];
+    var tgt = { ranges: { body: [2.5, 4] } };
+    var t = E.solve(bs, tgt, { brew: 'filter', index: idx });
+    var s = E.solve(bs, tgt, { brew: 'filter', index: idx, mode: 'stock', bagG: 250 });
+    var bagsT = E.maxBags(t.best.pcts, 250, [1000, 100]).bags, bagsS = E.maxBags(s.best.pcts, 250, [1000, 100]).bags;
+    ok(bagsS > bagsT && bagsS >= 2, bagsT + ' vs ' + bagsS);
+  });
+  test('SC28 presets are valid', function () {
+    E.PRESETS.forEach(function (p) {
+      ok(E.BREWS[p.brew], p.id + ' brew');
+      E.splitTerms(p.must).concat(E.splitTerms(p.mustNot)).forEach(function (t) { ok(E.resolveTerm(t, idx), p.id + ' term ' + t); });
+      Object.keys(p.ranges).forEach(function (a) { p.ranges[a].forEach(function (v) { ok(v === '' || (Number(v) >= 1 && Number(v) <= 5), p.id + ' ' + a); }); });
+    });
+  });
+  test('SC29 note learning down, up and undo', function () {
+    var g = bean({ id: 'g', roast: 2, notesText: 'jasmine, chocolate' });
+    var d = E.calibrateNotes([g], [100], 'filter', E.parseNotes('chocolate', idx).known);
+    eq(d, { g: { jasmine: { from: 1, to: 0.8 } } });
+    var nc = E.applyNoteCalib({}, d.g, 1); eq(nc, { jasmine: 0.8 });
+    g.noteCalib = nc;
+    near(E.simulateNotes([g], [100], 'filter').notes.filter(function (n) { return n.key === 'jasmine'; })[0].strength, 0.48);
+    eq(E.applyNoteCalib(nc, d.g, -1), {});
+    var h = bean({ id: 'h', notesText: 'orange' }), k = bean({ id: 'k', notesText: 'chocolate' });
+    var d2 = E.calibrateNotes([h, k], [10, 90], 'filter', E.parseNotes('orange, chocolate', idx).known);
+    eq(d2.h, { orange: { from: 1, to: 1.25 } });
+  });
+  test('SC30 rebalance respects minimums', function () {
+    eq(E.rebalance([50, 45, 5], 0, 95, [5, 5, 5], [100, 100, 100]), [90, 5, 5]);
+    eq(E.rebalance([40, 40, 20], 2, 10, [5, 30, 5], [100, 100, 100]), [45, 45, 10]);
+  });
+  test('SC31 process detection and offered processes', function () {
+    eq([E.processOf('Wet-hulled'), E.processOf('Washed'), E.processOf('Natural'), E.processOf('Honey'), E.processOf('Natural, monsooned')], ['semi', 'full', 'natural', 'semi', 'natural']);
+    eq(E.offeredProcesses('Wet-hulled, washed, natural, honey'), ['full', 'semi', 'natural']);
+    eq(E.offeredProcesses('Washed'), ['full']);
+  });
+  test('SC32 Gayo switched from semi wash to full wash and natural', function () {
+    var gayo = RD_ORIGINS.filter(function (o) { return o.id === 'id-gayo'; })[0];
+    eq(E.scoresFor(gayo, 3, 'semi'), { body: 4, acidity: 2.5, sweetness: 3.5, bitterness: 2.5 });
+    eq(E.scoresFor(gayo, 3, 'full'), { body: 3.2, acidity: 3.4, sweetness: 3.5, bitterness: 2.2 });
+    eq(E.scoresFor(gayo, 3, 'natural'), { body: 3.8, acidity: 2.9, sweetness: 3.9, bitterness: 2.3 });
+  });
+  // ---- v6 ----
+  test('SC33 catalogue-v2: Thai origins, varietals, roast colour', function () {
+    ok(RD_ORIGINS.filter(function (o) { return o.country === 'Thailand'; }).length >= 9);
+    var gayo = RD_ORIGINS.filter(function (o) { return o.id === 'id-gayo'; })[0];
+    eq(E.scoresFor(gayo, 3, 'semi', 'gesha'), { body: 3.6, acidity: 2.9, sweetness: 3.8, bitterness: 2.3 });
+    eq(E.roastColour(3).name, 'Omni');
+  });
+  test('SC34 new brew styles and acidity character', function () {
+    near(E.profile([bean({})], [100], 'icedmilk').acidity, 1.9);
+    var j = bean({ roast: 2, notesText: 'jasmine' });
+    near(E.simulateNotes([j], [100], 'icedmilk').notes[0].strength, 0.18);
+    var ev = E.evaluateMix([bean({ name: 'Mud', notesText: 'earthy' })], [100], {}, { brew: 'tonic', index: idx });
+    ok(/clash with tonic/.test(ev.warnings.join(' ')), ev.warnings.join(' | '));
+    var r = E.solve([bean({ name: 'Kenya', roast: 2, notesText: 'blackcurrant' }), bean({ name: 'Choc', notesText: 'chocolate' })], { must: ['acid:phosphoric'] }, { brew: 'filter', index: idx });
+    ok(r.status !== 'fail', r.reasons.join(' '));
+    eq(E.acidProfile(E.simulateNotes([bean({ roast: 2, notesText: 'lemon, apple' })], [100], 'filter')).dominant, 'citric');
+    E.PRESETS.filter(function (p) { return p.region; }).forEach(function (p) {
+      E.splitTerms(p.must).concat(E.splitTerms(p.mustNot)).forEach(function (t) { ok(E.resolveTerm(t, idx), p.id + ' term ' + t); });
+    });
+  });
+  test('SC35 specialty quality: predicted score and gate', function () {
+    var sp = { on: true, minScore: 84, arabicaOnly: true, minBalance: 1, minComplexity: 1 };
+    var a = bean({ name: 'A', cupScore: 82, notesText: 'caramel' }), b = bean({ name: 'B', cupScore: 86, notesText: 'chocolate' });
+    var ev = E.evaluateMix([a, b], [50, 50], { specialty: sp }, { brew: 'filter', index: idx });
+    eq(ev.predicted.value, 84);
+    eq(ev.status === 'fail', false);
+    var bad = bean({ name: 'C', cupScore: 86, notesText: 'chocolate, rubbery' });
+    var ev2 = E.evaluateMix([a, bad], [50, 50], { specialty: sp }, { brew: 'filter', index: idx });
+    eq(ev2.predicted.value, 82); eq(ev2.status, 'fail');
+    var r = E.solve([a, bean({ name: 'R', species: 'robusta', cupScore: 80 })], { specialty: { on: true, arabicaOnly: true } }, { brew: 'icedmilk', index: idx });
+    ok(r.status === 'fail' && /arabica only/.test(r.reasons.join(' ')), r.reasons.join(' '));
+    var r2 = E.solve([a, b], { specialty: { on: true, minScore: 85 } }, { brew: 'filter', index: idx });
+    ok(r2.best.pcts[1] >= 75, 'needs mostly B: ' + r2.best.pcts.join(':'));
+    eq(E.cvaToModel({ acidity: 15, mouthfeel: 0, sweetness: 7.5 }), { body: 1, acidity: 5, sweetness: 3 });
+  });
+  test('SC36 recipes', function () {
+    ['filter', 'espresso', 'kopisusu', 'tubruk', 'flatwhite', 'icedmilk', 'coldbrew', 'tonic'].forEach(function (b) { ok(E.recipeFor(b, 3).dose, b); });
+    eq(E.recipeFor('espresso', 3).ratio, '1:2');
+    ok(E.recipeFor('filter', 1).temp !== E.recipeFor('filter', 5).temp);
+  });
+  test('SC37 triangle test and re-match', function () {
+    var plan = E.trianglePlan(3);
+    plan.forEach(function (r) {
+      eq(r.codes.length, 3); ok(new Set(r.codes).size === 3);
+      var odd = r.samples[r.odd];
+      eq(r.samples.filter(function (s) { return s === odd; }).length, 1);
+    });
+    eq(E.triangleVerdict(3, 3).different, true);
+    eq(E.triangleVerdict(2, 3).different, false);
+    var bs = [bean({ name: 'A', scores: { body: 2, acidity: 4 }, notesText: 'orange' }), bean({ name: 'B', scores: { body: 5, acidity: 2 }, notesText: 'dark chocolate' })];
+    var ev = E.evaluateMix(bs, [40, 60], {}, { brew: 'filter', index: idx });
+    var r = E.solve(bs, E.referenceTarget(ev), { brew: 'filter', index: idx });
+    ok(Math.abs(r.best.pcts[0] - 40) <= 3 && r.status !== 'fail', r.best.pcts.join(':') + ' ' + r.reasons.join(' '));
+  });
+  test('Cupping-form estimates stay within 1–5', function () {
+    var ev = E.evaluateMix([bean({ name: 'X', notesText: 'dark chocolate, orange, caramel' }), bean({ name: 'Y', species: 'robusta', notesText: 'earthy' })], [70, 30], {}, { brew: 'espresso', index: idx });
+    ['balance', 'complexity', 'finish'].forEach(function (k) { ok(ev.form[k] >= 1 && ev.form[k] <= 5, k + ' ' + ev.form[k]); });
+  });
+
+  var s = document.getElementById('summary');
+  s.textContent = (failed ? '✗ ' : '✓ ') + passed + ' passed, ' + failed + ' failed';
+  s.className = failed ? 'fail' : 'pass';
+  window.__TEST_RESULT__ = { passed: passed, failed: failed };
+})();
+</script>
+</body>
+</html>
