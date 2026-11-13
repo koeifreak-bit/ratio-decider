@@ -70,6 +70,8 @@
       try { await dl.save({ filename: filename, data: text }); return true; }
       catch (e) { if (e && e.code === 'declined') return false; toast('Couldn\'t save the file.', true); return false; }
     }
+    // Inside the claude.ai viewer a plain download link is blocked, so only fall back when not framed by claude.ai.
+    if (claude) { toast('Downloading files isn\'t available in this view.', true); return false; }
     try {
       var blob = new Blob([text], { type: /\.html$/.test(filename) ? 'text/html' : 'application/json' });
       var url = URL.createObjectURL(blob), a = document.createElement('a');
