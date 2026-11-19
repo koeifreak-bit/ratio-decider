@@ -23,7 +23,8 @@
     learnRate: 0.5,
     noteLearn: { down: 0.8, up: 1.25, min: 0.3, max: 2 },
     robustStep: 2,
-    cupping: { sampleG: 60, cups: 5, doseG: 8.25, waterMl: 150, waterC: 93 }
+    cupping: { sampleG: 60, cups: 5, doseG: 8.25, waterMl: 150, waterC: 93 },
+    brewBias: {}
   };
 
   var BREWS = {
@@ -575,7 +576,9 @@
     var R = ctx.R, add = BREWS[ctx.brew].add;
     v.sweetness += Math.min(R.nudge.cap, nS);
     v.acidity += Math.min(R.nudge.cap, nA);
-    for (var k = 0; k < 4; k++) v[ATTRS[k]] += add[ATTRS[k]];
+    // Brew effect + the owner's auto-tuned bias for this brew (learned from cupping logs).
+    var bias = (R.brewBias && R.brewBias[ctx.brew]) || {};
+    for (var k = 0; k < 4; k++) v[ATTRS[k]] += add[ATTRS[k]] + (Number(bias[ATTRS[k]]) || 0);
     var b = clamp(v.bitterness, 1, 5);
     if (b > R.acidMask.from) v.acidity -= R.acidMask.k * (b - R.acidMask.from);
     if (b > R.sweetMask.from) v.sweetness -= R.sweetMask.k * (b - R.sweetMask.from);
@@ -945,7 +948,8 @@
     // clean verdict first, then better balance plus tolerance to weighing error, then fewest lost notes.
     var rank = { ok: 0, warn: 1, fail: 2 };
     var ranked = top.map(function (p, order) {
-      var tie = p.score === top[0].score && p.mode === top[0].mode;
+      // Full evaluation is costly; the 24 best ties are plenty to choose a clean, balanced, robust mix.
+      var tie = order < 24 && p.score === top[0].score && p.mode === top[0].mode;
       var ev = tie ? evaluateWithCtx(ctx, p.pcts, limits) : null;
       return {
         p: p, ev: ev, order: order, r: ev ? rank[ev.status] : 3,
@@ -1315,7 +1319,86 @@
     return out;
   }
 
+  // ---------- sourcing limits ----------
+  // countries: list of country names the owner can buy from; empty or missing = no limit.
+  function originAllowed(origin, countries) {
+    if (!countries || !countries.length) return true;
+    return countries.indexOf(origin.country) >= 0;
+  }
+
+  // ---------- auto-tune from cupping logs ----------
+  // samples: [{beans, pcts, brew, actual:{attr:value}}]. Beans carry their current calibration, so errors
+  // already fixed per bean are not learned twice. Returns a per-brew bias, shrunk toward 0 for small samples.
+  function fitBrewBias(samples, rules, opts) {
+    opts = opts || {};
+    var minN = opts.minN || 2, shrink = opts.shrink == null ? 2 : opts.shrink, lim = opts.clamp || 1;
+    var R0 = Object.assign({}, rules || DEFAULTS, { brewBias: {} });
+    var acc = {};
+    (samples || []).forEach(function (s) {
+      if (!s || !s.beans || !s.beans.length || !s.actual) return;
+      var brew = brewOf(s.brew);
+      var pred = profile(s.beans, s.pcts, brew, R0);
+      ATTRS.forEach(function (a) {
+        var v = s.actual[a];
+        if (v == null || v === '' || !isFinite(v)) return;
+        acc[brew] = acc[brew] || {};
+        var c = acc[brew][a] = acc[brew][a] || { sum: 0, n: 0 };
+        c.sum += Number(v) - pred[a]; c.n++;
+      });
+    });
+    var bias = {}, counts = {};
+    Object.keys(acc).forEach(function (brew) {
+      Object.keys(acc[brew]).forEach(function (a) {
+        var c = acc[brew][a];
+        counts[brew] = Math.max(counts[brew] || 0, c.n);
+        if (c.n < minN) return;
+        var v = round(clamp((c.sum / c.n) * c.n / (c.n + shrink), -lim, lim) / 0.05, 0) * 0.05;
+        v = round(v, 2);
+        if (v !== 0) { bias[brew] = bias[brew] || {}; bias[brew][a] = v; }
+      });
+    });
+    return { bias: bias, counts: counts };
+  }
+
+  // ---------- smart substitutes ----------
+  function similarity(a, b) {
+    var d = 0;
+    ATTRS.forEach(function (k) { d += Math.abs(effScore(a, k) - effScore(b, k)); });
+    d += 0.5 * Math.abs(clampRoast(a.roast) - clampRoast(b.roast));
+    if (a.species !== b.species) d += 1.5;
+    var fa = {}, shared = 0;
+    (a.notes || []).forEach(function (n) { fa[n.sub] = true; });
+    var seen = {};
+    (b.notes || []).forEach(function (n) { if (fa[n.sub] && !seen[n.sub]) { shared++; seen[n.sub] = true; } });
+    return d - 0.4 * shared;
+  }
+  // Replace beans[idx] with each candidate and re-solve so the cup stays as close as possible to the current one.
+  function substitutes(beans, pcts, idx, candidates, opts) {
+    opts = opts || {};
+    var t0 = Date.now();
+    var cur = evaluateMix(beans, pcts, opts.target || {}, opts);
+    var ref = referenceTarget(cur);
+    var t = opts.target || {};
+    var target = { ranges: ref.ranges, must: ref.must, mustNot: t.mustNot || [], specialty: t.specialty || null };
+    var gone = beans[idx];
+    var shortlist = (candidates || []).filter(function (c) {
+      return beans.every(function (b, i) { return i === idx || !(b.id && c.id && b.id === c.id) && b !== c; });
+    }).map(function (c) { return { c: c, sim: similarity(gone, c) }; })
+      .sort(function (x, y) { return x.sim - y.sim; }).slice(0, opts.shortlist || 10);
+    var rank = { ok: 0, warn: 1, fail: 2 };
+    var out = shortlist.map(function (s) {
+      var nb = beans.slice(); nb[idx] = s.c;
+      var res = solve(nb, target, Object.assign({}, opts, { limits: null, mode: 'taste' }));
+      return { candidate: s.c, similarity: round(s.sim, 2), result: res };
+    }).filter(function (x) { return x.result.best; });
+    out.sort(function (a, b) {
+      return a.result.best.score - b.result.best.score || rank[a.result.status] - rank[b.result.status] || a.similarity - b.similarity;
+    });
+    return { options: out.slice(0, opts.limit || 3), reference: cur, ms: Date.now() - t0 };
+  }
+
   root.RatioEngine = {
+    originAllowed: originAllowed, fitBrewBias: fitBrewBias, substitutes: substitutes, similarity: similarity,
     VARIETALS: VARIETALS, ROAST_COLOURS: ROAST_COLOURS, ACID_TYPES: ACID_TYPES, WATER: WATER,
     scoresForVarietal: scoresForVarietal, acidProfile: acidProfile, recipeFor: recipeFor, roastColour: roastColour,
     referenceTarget: referenceTarget, trianglePlan: trianglePlan, triangleVerdict: triangleVerdict, cvaToModel: cvaToModel,

@@ -7,7 +7,9 @@ A blend simulator for coffee resellers who buy roasted beans and blend them. It 
 - Can pick the beans for you, check the blend against high-end specialty rules, plan SCA cupping and learn from your cupping log.
 - Writes recipe cards and café spec sheets, and checks lot-to-lot consistency with triangle tests.
 
-Open `index.html` (or the GitHub Pages site). Your data is saved in your own browser only, never in this repository. To move it to another device, use **Settings → Backup**.
+- Limits suggestions to the countries you can actually source from, finds substitutes that keep the same cup when a bean runs out, and auto-tunes its rules from your cupping logs.
+
+Open `index.html` (or the GitHub Pages site). Your data is never stored in this repository. Without signing in it stays in your browser; sign in under **Settings → Cloud sync** to sync your phone and laptop through the owner's Supabase project (row-level security: only the signed-in owner can read or write).
 
 `tests.html` runs the engine tests in the browser.
 

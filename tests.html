@@ -374,6 +374,34 @@
     var r = E.solve(bs, E.referenceTarget(ev), { brew: 'filter', index: idx });
     ok(Math.abs(r.best.pcts[0] - 40) <= 3 && r.status !== 'fail', r.best.pcts.join(':') + ' ' + r.reasons.join(' '));
   });
+  // ---- v4: sourcing limits, auto-tune, substitutes ----
+  test('SC38 sourcing limits by country', function () {
+    var thai = RD_ORIGINS.filter(function (o) { return o.country === 'Thailand'; })[0];
+    eq(E.originAllowed(thai, []), true);
+    eq(E.originAllowed(thai, ['Indonesia', 'Thailand']), true);
+    eq(E.originAllowed(thai, ['Indonesia']), false);
+  });
+  test('SC39 auto-tune learns a brew bias and the solver uses it', function () {
+    var b = bean({ id: 'x', scores: { acidity: 3 } });
+    var base = E.profile([b], [100], 'kopisusu').acidity;
+    var samples = [1, 2, 3, 4].map(function () { return { beans: [b], pcts: [100], brew: 'kopisusu', actual: { acidity: base + 0.6 } }; });
+    var fit = E.fitBrewBias(samples);
+    near(fit.bias.kopisusu.acidity, 0.4, 1e-9);
+    eq(fit.counts.kopisusu, 4);
+    var R = E.withRules({ brewBias: fit.bias });
+    near(E.profile([b], [100], 'kopisusu', R).acidity, base + 0.4, 1e-9);
+    eq(E.fitBrewBias(samples.slice(0, 1)).bias, {});
+  });
+  test('SC40 smart substitute keeps the cup', function () {
+    var A = bean({ id: 'A', name: 'A', scores: { body: 2 }, notesText: 'orange' });
+    var B = bean({ id: 'B', name: 'B', scores: { body: 5 }, notesText: 'dark chocolate' });
+    var C = bean({ id: 'C', name: 'C', scores: { body: 5 }, notesText: 'dark chocolate' });
+    var D = bean({ id: 'D', name: 'D', scores: { body: 1, acidity: 5 }, notesText: 'jasmine' });
+    var r = E.substitutes([A, B], [40, 60], 1, [C, D, A], { brew: 'filter', index: idx });
+    eq(r.options[0].candidate.name, 'C');
+    ok(Math.abs(r.options[0].result.best.pcts[0] - 40) <= 3, r.options[0].result.best.pcts.join(':'));
+    ok(r.options.every(function (o) { return o.candidate.name !== 'A'; }), 'beans already in the mix are not offered');
+  });
   test('Cupping-form estimates stay within 1–5', function () {
     var ev = E.evaluateMix([bean({ name: 'X', notesText: 'dark chocolate, orange, caramel' }), bean({ name: 'Y', species: 'robusta', notesText: 'earthy' })], [70, 30], {}, { brew: 'espresso', index: idx });
     ['balance', 'complexity', 'finish'].forEach(function (k) { ok(ev.form[k] >= 1 && ev.form[k] <= 5, k + ' ' + ev.form[k]); });

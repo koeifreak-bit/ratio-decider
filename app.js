@@ -86,7 +86,8 @@
   var state = {
     mode: 'connecting', route: 'simulator',
     beans: [], blends: [], batches: [], cuppings: [],
-    settings: { rules: {}, customNotes: {}, customOrigins: [], customPresets: [] },
+    settings: { rules: {}, customNotes: {}, customOrigins: [], customPresets: [], sourceCountries: [], brewBias: {} },
+    cloud: null, subs: null,
     confirm: null, beanForm: null, cupDraft: null, sample: null, aiHidden: false, mapper: null
   };
   function origins() { return BASE_ORIGINS.concat(state.settings.customOrigins || []); }
@@ -128,7 +129,9 @@
   function saveSimDraft() { lsSet('rd.sim.v2', Object.assign({}, sim, { result: null, cupping: null, busy: false })); }
 
   function beanById(id) { for (var i = 0; i < state.beans.length; i++) if (state.beans[i].id === id) return state.beans[i]; return null; }
-  function rules() { return E.withRules(state.settings.rules); }
+  function rules() { return E.withRules(Object.assign({}, state.settings.rules, { brewBias: state.settings.brewBias || {} })); }
+  function rulesNoBias() { return E.withRules(Object.assign({}, state.settings.rules, { brewBias: {} })); }
+  function sourceable(o) { return E.originAllowed(o, state.settings.sourceCountries); }
   var idxCache = { key: null, index: null };
   function noteIndex() {
     var key = JSON.stringify(state.settings.customNotes || {});
@@ -141,10 +144,19 @@
       cupScore: b.cupScore, scores: b.scores, calib: b.calib, noteCalib: b.noteCalib, notes: parse(b.bagNotes).known, bagNotes: b.bagNotes, stockG: b.stockG };
   }
 
-  // ---------------- store (artifact db, or in-memory) ----------------
+  // ---------------- store: claude.ai db > cloud (Supabase, GitHub site only) > this browser > memory ----------------
   var db = null;
   var COLS = ['beans', 'blends', 'batches', 'cuppings'];
   function sortByDate(list) { return list.sort(function (a, b) { return (b.createdAt || 0) - (a.createdAt || 0); }); }
+  function normSettings(s) {
+    s = s || {};
+    return {
+      rules: Object.assign({}, s.rules || {}), customNotes: Object.assign({}, s.customNotes || {}),
+      customOrigins: (s.customOrigins || []).slice(), customPresets: (s.customPresets || []).slice(),
+      sourceCountries: Array.isArray(s.sourceCountries) ? s.sourceCountries.filter(function (x) { return typeof x === 'string'; }) : [],
+      brewBias: s.brewBias && typeof s.brewBias === 'object' ? JSON.parse(JSON.stringify(s.brewBias)) : {}
+    };
+  }
   async function initStore() {
     var claude = window.claude;
     try { db = claude && claude.use ? await claude.use('db') : null; } catch (e) { db = null; }
@@ -153,7 +165,9 @@
       // Outside claude.ai (e.g. GitHub Pages): keep data in this browser, or only in memory if storage is blocked.
       state.mode = lsSet('rd.store.test', 1) ? 'local' : 'memory';
       if (state.mode === 'local') localLoad();
-      pruneMissingBeans(); render(); return;
+      pruneMissingBeans(); render();
+      initCloud();
+      return;
     }
     state.mode = 'db';
     var pending = COLS.length + 1;
@@ -170,7 +184,7 @@
     var firstS = true;
     db.doc('settings/main').onSnapshot(function (snap) {
       var d = snap.exists ? snap.data() : {};
-      state.settings = { rules: Object.assign({}, d.rules || {}), customNotes: Object.assign({}, d.customNotes || {}), customOrigins: (d.customOrigins || []).slice(), customPresets: (d.customPresets || []).slice() };
+      state.settings = normSettings(d);
       if (firstS && !snap.metadata.fromCache) { firstS = false; done(); }
       scheduleRender();
     }, function () { done(); });
@@ -180,13 +194,141 @@
     var d = lsGet(LOCAL_KEY);
     if (!d || typeof d !== 'object') return;
     COLS.forEach(function (c) { state[c] = sortByDate(Array.isArray(d[c]) ? d[c].filter(function (x) { return x && typeof x.id === 'string'; }) : []); });
-    var s = d.settings || {};
-    state.settings = { rules: Object.assign({}, s.rules || {}), customNotes: Object.assign({}, s.customNotes || {}), customOrigins: (s.customOrigins || []).slice(), customPresets: (s.customPresets || []).slice() };
+    state.settings = normSettings(d.settings);
+    state.localCloudUser = d.cloudUser || null;
   }
+  // In cloud mode this is the offline cache, tagged with the account it came from.
   function localSave() {
-    if (state.mode !== 'local') return;
-    var ok = lsSet(LOCAL_KEY, { beans: state.beans, blends: state.blends, batches: state.batches, cuppings: state.cuppings, settings: state.settings, savedAt: Date.now() });
-    if (!ok) { state.mode = 'memory'; toast('This browser is out of space or blocks saving. Download a backup now so you don\'t lose your data.', true); }
+    if (state.mode !== 'local' && state.mode !== 'cloud') return;
+    var ok = lsSet(LOCAL_KEY, { beans: state.beans, blends: state.blends, batches: state.batches, cuppings: state.cuppings, settings: state.settings, savedAt: Date.now(),
+      cloudUser: state.mode === 'cloud' && state.cloud && state.cloud.userId ? state.cloud.userId : null });
+    if (!ok && state.mode === 'local') { state.mode = 'memory'; toast('This browser is out of space or blocks saving. Download a backup now so you don\'t lose your data.', true); }
+  }
+
+  // ---------- cloud sync (Supabase). Only the GitHub site loads the client and config. ----------
+  var cloudClient = null, cloudPending = {};
+  function cloudAvailable() { return !!(window.RD_CLOUD && window.supabase && window.supabase.createClient); }
+  function initCloud() {
+    if (!cloudAvailable()) return;
+    try {
+      cloudClient = window.supabase.createClient(window.RD_CLOUD.url, window.RD_CLOUD.key, { auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true } });
+    } catch (e) { cloudClient = null; return; }
+    state.cloud = { status: 'signed-out', email: '', userId: null, msg: '', busy: false, conflict: null };
+    cloudClient.auth.onAuthStateChange(function (event, session) {
+      // Never await Supabase calls inside this callback; defer them.
+      if (event === 'SIGNED_OUT') setTimeout(leaveCloud, 0);
+      else if (session && session.user && state.cloud.status === 'signed-out') setTimeout(function () { enterCloud(session); }, 0);
+    });
+    window.addEventListener('focus', cloudRefresh);
+    window.addEventListener('online', cloudFlush);
+    document.addEventListener('visibilitychange', function () { if (!document.hidden) cloudRefresh(); });
+    render();
+  }
+  function cloudErr(e) { return (e && (e.message || e.error_description || e.code)) || 'unknown error'; }
+  async function cloudFetch() {
+    var out = { beans: [], blends: [], batches: [], cuppings: [], settings: null }, from = 0;
+    for (;;) {
+      var r = await cloudClient.from('ratio_docs').select('collection,id,data').range(from, from + 999);
+      if (r.error) throw r.error;
+      r.data.forEach(function (row) {
+        if (row.collection === 'settings') out.settings = row.data;
+        else if (out[row.collection]) out[row.collection].push(Object.assign({}, row.data, { id: row.id }));
+      });
+      if (r.data.length < 1000) break;
+      from += 1000;
+    }
+    return out;
+  }
+  function applyRemote(remote) {
+    COLS.forEach(function (c) { state[c] = sortByDate(remote[c]); });
+    if (remote.settings) state.settings = normSettings(remote.settings);
+    localSave(); pruneMissingBeans();
+  }
+  async function cloudWrite(col, id, data) {
+    var key = col + '/' + id;
+    cloudPending[key] = { col: col, id: id, data: data };
+    try {
+      var r = data === null
+        ? await cloudClient.from('ratio_docs').delete().eq('collection', col).eq('id', id)
+        : await cloudClient.from('ratio_docs').upsert({ user_id: state.cloud.userId, collection: col, id: id, data: data, updated_at: new Date().toISOString() });
+      if (r.error) throw r.error;
+      if (cloudPending[key] && cloudPending[key].data === data) delete cloudPending[key];
+      state.cloud.lastSync = Date.now();
+    } catch (e) {
+      toast('Saved on this device, but the cloud couldn\'t be reached. It will sync when you\'re back online.', true);
+    }
+  }
+  async function cloudFlush() {
+    if (state.mode !== 'cloud') return;
+    var keys = Object.keys(cloudPending);
+    for (var i = 0; i < keys.length; i++) { var p = cloudPending[keys[i]]; if (p) await cloudWrite(p.col, p.id, p.data); }
+  }
+  var refreshing = false;
+  async function cloudRefresh() {
+    if (state.mode !== 'cloud' || refreshing || Object.keys(cloudPending).length) { if (state.mode === 'cloud') cloudFlush(); return; }
+    refreshing = true;
+    try { applyRemote(await cloudFetch()); state.cloud.lastSync = Date.now(); scheduleRender(); } catch (e) { /* keep the cached data */ }
+    refreshing = false;
+  }
+  function localSnapshot() { var o = {}; COLS.forEach(function (c) { o[c] = state[c].slice(); }); o.settings = state.settings; return o; }
+  async function cloudUploadAll(snap) {
+    var rows = [];
+    COLS.forEach(function (c) { snap[c].forEach(function (d) { rows.push({ user_id: state.cloud.userId, collection: c, id: d.id, data: strip(d), updated_at: new Date().toISOString() }); }); });
+    rows.push({ user_id: state.cloud.userId, collection: 'settings', id: 'main', data: snap.settings, updated_at: new Date().toISOString() });
+    for (var i = 0; i < rows.length; i += 200) {
+      var r = await cloudClient.from('ratio_docs').upsert(rows.slice(i, i + 200));
+      if (r.error) throw r.error;
+    }
+  }
+  async function enterCloud(session) {
+    var C = state.cloud;
+    C.status = 'connecting'; C.email = session.user.email || ''; C.userId = session.user.id; C.msg = ''; render();
+    try {
+      var claim = await cloudClient.rpc('ratio_claim');
+      if (claim.error) throw claim.error;
+      if (claim.data !== true) {
+        C.msg = 'This sync space already belongs to another account, so you were signed out.';
+        await cloudClient.auth.signOut();
+        return;
+      }
+      var remote = await cloudFetch();
+      var remoteHas = COLS.some(function (c) { return remote[c].length; }) || !!remote.settings;
+      var localHas = COLS.some(function (c) { return state[c].length; });
+      var cacheIsThisAccount = state.localCloudUser === session.user.id;
+      if (!remoteHas && localHas) { state.mode = 'cloud'; await cloudUploadAll(localSnapshot()); C.msg = 'This device\'s data is now in the cloud.'; }
+      else if (remoteHas && localHas && !cacheIsThisAccount) { C.conflict = remote; C.status = 'conflict'; render(); return; }
+      else applyRemote(remote);
+      state.mode = 'cloud'; C.status = 'signed-in'; C.lastSync = Date.now(); state.localCloudUser = session.user.id; localSave();
+    } catch (e) {
+      C.status = 'signed-out'; C.msg = 'Couldn\'t reach the cloud: ' + cloudErr(e) + '. Your data stays on this device.';
+    }
+    render();
+  }
+  async function resolveConflict(choice) {
+    var C = state.cloud, remote = C.conflict;
+    C.busy = true; render();
+    try {
+      state.mode = 'cloud'; C.status = 'signed-in';
+      if (choice === 'merge') {
+        var merged = {};
+        COLS.forEach(function (c) {
+          var have = {}; remote[c].forEach(function (d) { have[d.id] = true; });
+          merged[c] = remote[c].concat(state[c].filter(function (d) { return !have[d.id]; }));
+        });
+        merged.settings = remote.settings || state.settings;
+        await cloudUploadAll(merged);
+        applyRemote(merged);
+        C.msg = 'Merged this device into the cloud.';
+      } else { applyRemote(remote); C.msg = 'Using the cloud data.'; }
+      C.conflict = null; C.lastSync = Date.now(); state.localCloudUser = C.userId; localSave();
+    } catch (e) { state.mode = 'local'; C.status = 'signed-out'; C.msg = 'Couldn\'t sync: ' + cloudErr(e); }
+    C.busy = false; render();
+  }
+  function leaveCloud() {
+    if (!state.cloud) return;
+    state.cloud.status = 'signed-out'; state.cloud.userId = null; state.cloud.conflict = null;
+    if (state.mode === 'cloud') { state.mode = 'local'; localSave(); }
+    render();
   }
   // A remembered simulator draft can point at beans that no longer exist (deleted, or on another device).
   function pruneMissingBeans() {
@@ -212,20 +354,23 @@
     var list = state[col].filter(function (x) { return x.id !== id; });
     list.push(Object.assign({ id: id }, data));
     state[col] = sortByDate(list); localSave(); scheduleRender();
+    if (state.mode === 'cloud') cloudWrite(col, id, data);
   }
   async function patchDoc(col, id, patch) {
     if (db) { try { await db.collection(col).doc(id).update(patch); } catch (e) { writeError(e); } return; }
     state[col] = state[col].map(function (x) { return x.id === id ? Object.assign({}, x, patch) : x; }); localSave(); scheduleRender();
+    if (state.mode === 'cloud') { var d = state[col].filter(function (x) { return x.id === id; })[0]; if (d) cloudWrite(col, id, strip(d)); }
   }
   async function delDoc(col, id) {
     if (db) { try { await db.collection(col).doc(id).delete(); } catch (e) { writeError(e); } return; }
     state[col] = state[col].filter(function (x) { return x.id !== id; }); localSave(); scheduleRender();
+    if (state.mode === 'cloud') cloudWrite(col, id, null);
   }
   async function saveSettings(patch) {
-    var next = Object.assign({}, state.settings, patch);
-    var data = { rules: next.rules || {}, customNotes: next.customNotes || {}, customOrigins: next.customOrigins || [], customPresets: next.customPresets || [] };
+    var data = normSettings(Object.assign({}, state.settings, patch));
     if (db) { try { await db.doc('settings/main').set(data); } catch (e) { writeError(e); } return; }
     state.settings = data; localSave(); scheduleRender();
+    if (state.mode === 'cloud') cloudWrite('settings', 'main', data);
   }
   function strip(doc) { var o = Object.assign({}, doc); delete o.id; return o; }
 
@@ -257,7 +402,10 @@
   }
   function banner() {
     if (state.mode === 'memory') return el('div', { class: 'banner' }, 'This browser isn\'t letting the page save (private window or blocked site data). Anything you add is lost when you close it. Use a normal window, or download a backup under Settings before you leave.');
-    if (state.mode === 'local') return el('p', { class: 'muted small', style: 'margin:0 0 12px' }, 'Saved in this browser on this device. To use your data on another device, download a backup under Settings and restore it there.');
+    if (state.mode === 'cloud') return el('p', { class: 'muted small', style: 'margin:0 0 12px' }, '☁ Synced to the cloud as ' + (state.cloud.email || 'you') + '. Changes appear on your other devices when you open or switch back to the page there.');
+    if (state.cloud && state.cloud.status === 'conflict') return el('div', { class: 'banner' }, 'You signed in, and both this device and the cloud already have data. Choose what to keep under Settings → Cloud sync.');
+    if (state.mode === 'local') return el('p', { class: 'muted small', style: 'margin:0 0 12px' }, 'Saved in this browser on this device. ' +
+      (state.cloud ? 'Sign in under Settings → Cloud sync to use the same data on your phone and laptop.' : 'To use your data on another device, download a backup under Settings and restore it there.'));
     if (state.mode === 'slow') return el('div', { class: 'banner' }, 'Your saved beans can\'t be reached yet. What you see may be out of date. It will update by itself once the connection is back.');
     return null;
   }
@@ -550,30 +698,87 @@
       el('div', { class: 'row tight' }, el('span', { class: 'dot', style: 'background:' + color }), el('div', { style: 'flex:1;min-width:0' }, src),
         el('button', { class: 'btn ghost', type: 'button', 'aria-label': 'Remove bean', onclick: function () { sim.rows.splice(i, 1); clearMix(); simChanged(true); } }, 'Remove')),
       body,
+      sim.pcts && sim.pcts.length === sim.rows.length ? substituteBlock(i, row) : null,
       el('div', { class: 'row tight small' }, el('span', { class: 'muted' }, 'Share limits'),
         el('input', { type: 'number', id: 'row-min-' + row.key, min: 0, max: 100, placeholder: 'min %', value: row.min, style: 'width:90px', oninput: function (e) { row.min = e.target.value; simChanged(false); } }),
         el('input', { type: 'number', id: 'row-max-' + row.key, min: 0, max: 100, placeholder: 'max %', value: row.max, style: 'width:90px', oninput: function (e) { row.max = e.target.value; simChanged(false); } })));
   }
 
   // ---------------- bean picker ----------------
+  // Saved beans with stock, as candidates for the picker and substitute search.
+  function savedCandidates() {
+    return state.beans.filter(function (b) { return (b.stockG || 0) > 0; }).map(function (b) {
+      var sb = savedBean(b); sb.src = { kind: 'saved', beanId: b.id }; return sb;
+    });
+  }
+  // Catalogue origins you can actually buy (Settings → Countries I can source from), in every process they're sold in.
+  function catalogueCandidates(roast) {
+    var idx = noteIndex(), out = [];
+    roast = Number(roast) || 3;
+    origins().filter(sourceable).forEach(function (o) {
+      var procs = E.offeredProcesses(o.process);
+      (procs.length ? procs : [mainProcess(o)]).forEach(function (p) {
+        out.push({ id: null, quick: true, name: o.region + (procs.length > 1 ? ' · ' + E.PROCESSES[p].short.toLowerCase() : ''), species: o.species, roast: roast, process: p,
+          scores: E.scoresFor(o, roast, p), notes: E.parseNotes(o.notes, idx).known, stockG: null, originKey: o.id, src: { kind: 'origin', originId: o.id, roast: roast, process: p } });
+      });
+    });
+    return out;
+  }
   function pickCandidates() {
-    var P = sim.pick, idx = noteIndex(), out = [];
-    if (P.source !== 'catalogue') {
-      state.beans.filter(function (b) { return (b.stockG || 0) > 0; }).forEach(function (b) {
-        var sb = savedBean(b); sb.src = { kind: 'saved', beanId: b.id }; out.push(sb);
-      });
-    }
+    var P = sim.pick, out = [];
+    if (P.source !== 'catalogue') out = out.concat(savedCandidates());
     if (P.source !== 'mine') {
-      var roast = Number(P.roast) || 3;
-      origins().forEach(function (o) {
-        var procs = E.offeredProcesses(o.process);
-        (procs.length ? procs : [mainProcess(o)]).forEach(function (p) {
-          out.push({ id: null, quick: true, name: o.region + (procs.length > 1 ? ' · ' + E.PROCESSES[p].short.toLowerCase() : ''), species: o.species, roast: roast, process: p,
-            scores: E.scoresFor(o, roast, p), notes: E.parseNotes(o.notes, idx).known, stockG: null, originKey: o.id, src: { kind: 'origin', originId: o.id, roast: roast, process: p } });
-        });
-      });
+      out = out.concat(catalogueCandidates(P.roast));
     }
     return out;
+  }
+  function sourcingNote() {
+    var sc = state.settings.sourceCountries || [];
+    return sc.length ? 'Catalogue limited to what you can source: ' + sc.join(', ') + '. Change it under Settings.' : 'Catalogue: all countries. Limit it to what you can actually buy under Settings → Countries I can source from.';
+  }
+
+  // ---------------- smart substitutes ----------------
+  function runSubstitute(i) {
+    if (!sim.pcts || sim.pcts.length !== sim.rows.length) { toast('Decide a ratio first, then look for a substitute.', true); return; }
+    var beans = simBeans(), gone = beans[i];
+    var roast = gone.roast || 3;
+    // Never offer a bean that is already in the mix (the one being replaced included).
+    function same(c, b) { return c.src.kind === 'saved' ? !!b.id && c.src.beanId === b.id : !b.id && c.src.originId === b.originId && c.process === b.process; }
+    var cands = savedCandidates().concat(catalogueCandidates(roast)).filter(function (c) { return !beans.some(function (b) { return same(c, b); }); });
+    state.subs = { key: sim.rows[i].key, busy: true, res: null };
+    render();
+    setTimeout(function () {
+      var t = simTarget();
+      state.subs.res = E.substitutes(beans, sim.pcts, i, cands, { brew: sim.brew, rules: rules(), index: noteIndex(), target: t, limit: 3, shortlist: 12 });
+      state.subs.busy = false; render();
+    }, 30);
+  }
+  function useSubstitute(i, opt) {
+    var c = opt.candidate;
+    var row = c.src.kind === 'saved' ? savedRow(c.src.beanId) : (function () { var o = originById(c.src.originId); return quickRow(o.region, o.id, c.src.roast, o.notes, c.src.process); })();
+    sim.rows[i] = row;
+    sim.result = opt.result; sim.pcts = opt.result.best.pcts.slice(); sim.manual = false; sim.cupping = null; state.subs = null;
+    sim.sig = simSig(); saveSimDraft(); render();
+    toast('Swapped in ' + c.name + '. The ratio was re-solved to keep the same cup.');
+  }
+  function substituteBlock(i, row) {
+    var S = state.subs;
+    var btn = el('button', { class: 'btn ghost', type: 'button', onclick: function () { runSubstitute(i); } }, 'Find a substitute');
+    if (!S || S.key !== row.key) return btn;
+    if (S.busy) return el('p', { class: 'small muted' }, 'Looking for beans that keep the same cup…');
+    var opts = S.res ? S.res.options : [];
+    return el('div', { class: 'stack', style: 'gap:6px' },
+      el('div', { class: 'row' }, el('span', { class: 'label' }, 'Substitutes that keep this cup'), el('span', { class: 'spacer' }),
+        el('button', { class: 'btn ghost', type: 'button', onclick: function () { state.subs = null; render(); } }, 'Close')),
+      el('p', { class: 'muted small' }, sourcingNote()),
+      opts.length ? opts.map(function (o) {
+        var c = o.candidate;
+        return el('div', { class: 'alt' },
+          el('div', { class: 'row' }, statusPill(o.result.status, o.result.headline), el('span', { class: 'spacer' }), el('span', { class: 'mono' }, 'new ratio ' + o.result.best.pcts.join(' : '))),
+          el('div', { class: 'row tight small' }, el('b', null, c.name), speciesBadge(c.species), procBadge(c.process), el('span', { class: 'muted' }, c.src.kind === 'saved' ? 'in stock · ' + fmtKg(c.stockG || 0) : 'from the catalogue')),
+          el('p', { class: 'small muted' }, o.result.best.notes.summary),
+          el('button', { class: 'btn', type: 'button', onclick: function () { useSubstitute(i, o); } }, 'Use this substitute'));
+      }) : el('p', { class: 'small' }, 'Nothing close enough. Widen your sourcing countries or add more beans.'));
   }
   function runPick() {
     var cands = pickCandidates();
@@ -608,6 +813,7 @@
         field('Up to', el('select', { id: 'pk-max', value: String(P.maxBeans), onchange: function (e) { P.maxBeans = Number(e.target.value); pickRes = null; simChanged(true); } },
           opt('2', '2 beans'), opt('3', '3 beans'), opt('4', '4 beans (slower)')))),
       P.source !== 'mine' ? field('Catalogue beans roasted at', roastSelect('pk-roast', P.roast, function (e) { P.roast = Number(e.target.value); pickRes = null; simChanged(true); }), 'Catalogue origins are tried in each process they are known for (full wash, semi wash, natural).') : null,
+      P.source !== 'mine' ? el('p', { class: 'muted small' }, sourcingNote(), ' ', el('a', { href: '#prefs' }, 'Change')) : null,
       el('button', { class: 'btn primary', type: 'button', disabled: pickBusy, onclick: runPick }, pickBusy ? 'Searching…' : 'Find the best beans'),
       pickRes ? (pickRes.picks.length ? el('div', { class: 'list' },
         el('p', { class: 'muted small mono' }, 'Compared ' + pickRes.considered + ' promising beans · ' + nf(pickRes.evals) + ' mixes · ' + nf(pickRes.ms) + ' ms'),
@@ -864,7 +1070,10 @@
         }), el('tr', null, el('td', null, el('b', null, 'Total')), el('td', { class: 'num mono' }, el('b', null, fmtKg(pw.totalG))), el('td'), el('td'))))),
       el('div', { class: 'row' },
         el('button', { class: 'btn', type: 'button', disabled: !allSaved || anyShort || !pw.totalG, onclick: function () { logBatch(beans, pw); } }, 'Log this batch and deduct stock'),
-        !allSaved ? el('span', { class: 'muted small' }, 'Quick beans have no stock. Save them under My beans to log batches.') : anyShort ? el('span', { class: 'small delta-neg' }, 'Not enough stock for this plan.') : null));
+        !allSaved ? el('span', { class: 'muted small' }, 'Quick beans have no stock. Save them under My beans to log batches.') : anyShort ? el('span', { class: 'small delta-neg' }, 'Not enough stock for this plan.') : null),
+      anyShort ? el('div', { class: 'row small' }, el('span', null, 'Running short? '), beans.map(function (b, i) {
+        return short[i] > 0 ? el('button', { class: 'btn ghost', type: 'button', onclick: function () { runSubstitute(i); toast('Substitutes for ' + b.name + ' are listed under that bean in the mix.'); } }, 'Find a substitute for ' + b.name) : null;
+      })) : null);
   }
   async function logBatch(beans, pw) {
     var live = beans.map(function (b) { return beanById(b.id); });
@@ -1502,7 +1711,7 @@
       el('div', { class: 'row' },
         el('button', { class: 'btn primary', type: 'button', onclick: async function () { try { await saveSettings({ rules: draft }); state.rulesDraft = null; toast('Rules saved.'); } catch (e) { /* shown */ } } }, 'Save rules'),
         el('button', { class: 'btn ghost', type: 'button', onclick: async function () { try { await saveSettings({ rules: {} }); state.rulesDraft = null; toast('Rules reset to defaults.'); } catch (e) { /* shown */ } } }, 'Reset to defaults'))));
-    parts.push(presetsCard(), notesWordsCard(), originsCard(), backupCard());
+    parts.push(cloudCard(), sourcingCard(), tuneCard(), presetsCard(), notesWordsCard(), originsCard(), backupCard());
     parts.push(el('section', { class: 'card', 'aria-labelledby': 'md-h' },
       el('h3', { id: 'md-h' }, 'How the simulator thinks'),
       el('ul', { class: 'reasons small' },
@@ -1515,6 +1724,110 @@
         el('li', null, 'When several mixes hit your target, it prefers a clean verdict, better balance (pairings that work, no clashes, no single note drowning the rest) and ratios that still hold if your weighing is off by 2%.'),
         el('li', null, 'Cupping entries correct each bean\'s scores by half the error, in proportion to its share, and make bag notes stronger or weaker based on what you tasted. It\'s a planning model, so always confirm at the cupping table.'))));
     return el('div', { class: 'stack' }, parts);
+  }
+  function cloudCard() {
+    var C = state.cloud;
+    if (!C) return null;
+    var f = state.cloudForm = state.cloudForm || { email: '', password: '' };
+    async function doAuth(kind) {
+      if (!f.email.trim() || f.password.length < 6) { toast('Enter your email and a password of at least 6 characters.', true); return; }
+      C.busy = true; C.msg = ''; render();
+      try {
+        var r = kind === 'up'
+          ? await cloudClient.auth.signUp({ email: f.email.trim(), password: f.password, options: { emailRedirectTo: location.origin + location.pathname } })
+          : await cloudClient.auth.signInWithPassword({ email: f.email.trim(), password: f.password });
+        if (r.error) throw r.error;
+        if (kind === 'up' && !r.data.session) C.msg = 'Account created. Open the confirmation email, tap the link, then come back here and sign in.';
+        f.password = '';
+      } catch (e) { C.msg = cloudErr(e); }
+      C.busy = false; render();
+    }
+    var body;
+    if (C.status === 'signed-in') {
+      body = [el('p', { class: 'small' }, 'Signed in as ', el('b', null, C.email), '. Your beans, blends, batches, cuppings and settings sync between devices.'),
+        C.lastSync ? el('p', { class: 'muted small' }, 'Last synced ' + new Date(C.lastSync).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' }) + '.') : null,
+        el('div', { class: 'row' },
+          el('button', { class: 'btn', type: 'button', onclick: async function () { await cloudFlush(); await cloudRefresh(); toast('Synced.'); } }, 'Sync now'),
+          el('button', { class: 'btn ghost', type: 'button', onclick: async function () { await cloudClient.auth.signOut(); } }, 'Sign out'))];
+    } else if (C.status === 'conflict') {
+      var n = function (src) { return COLS.map(function (c) { return src[c].length + ' ' + c; }).join(', '); };
+      body = [el('p', { class: 'small' }, 'Both this device and your cloud account already have data.'),
+        el('p', { class: 'small muted' }, 'This device: ' + n(state) + '. Cloud: ' + n(C.conflict) + '.'),
+        el('div', { class: 'row' },
+          el('button', { class: 'btn primary', type: 'button', disabled: C.busy, onclick: function () { resolveConflict('merge'); } }, 'Merge this device into the cloud'),
+          el('button', { class: 'btn', type: 'button', disabled: C.busy, onclick: function () { resolveConflict('cloud'); } }, 'Use the cloud data only'))];
+    } else {
+      body = [el('p', { class: 'small' }, 'Sign in to keep the same beans, blends and cuppings on your phone and laptop. Data is stored in your own Supabase project and only your account can read it.'),
+        el('div', { class: 'grid2' },
+          field('Email', el('input', { type: 'email', id: 'cl-email', autocomplete: 'email', value: f.email, oninput: function (e) { f.email = e.target.value; } })),
+          field('Password', el('input', { type: 'password', id: 'cl-pass', autocomplete: 'current-password', value: f.password, oninput: function (e) { f.password = e.target.value; } }))),
+        el('div', { class: 'row' },
+          el('button', { class: 'btn primary', type: 'button', disabled: C.busy || C.status === 'connecting', onclick: function () { doAuth('in'); } }, C.status === 'connecting' ? 'Connecting…' : 'Sign in'),
+          el('button', { class: 'btn', type: 'button', disabled: C.busy, onclick: function () { doAuth('up'); } }, 'Create account')),
+        el('p', { class: 'muted small' }, 'Only one account can own this sync space: the first one to sign in.')];
+    }
+    return el('section', { class: 'card', 'aria-labelledby': 'cl-h', id: 'cloud' },
+      el('h3', { id: 'cl-h' }, 'Cloud sync'), body, C.msg ? el('p', { class: 'small' }, C.msg) : null);
+  }
+  function sourcingCard() {
+    var all = Array.from(new Set(origins().map(function (o) { return o.country; }))).sort(function (a, b) { return a === 'Indonesia' ? -1 : b === 'Indonesia' ? 1 : a.localeCompare(b); });
+    var cur = state.settings.sourceCountries || [];
+    var d = state.srcDraft = state.srcDraft || cur.slice();
+    var counts = {}; origins().forEach(function (o) { counts[o.country] = (counts[o.country] || 0) + 1; });
+    var SEA = ['Indonesia', 'Thailand', 'Vietnam', 'Philippines', 'Malaysia', 'Laos', 'Myanmar', 'Timor-Leste'];
+    function set(list) { state.srcDraft = list.slice(); render(); }
+    return el('section', { class: 'card', 'aria-labelledby': 'sc-h' },
+      el('h3', { id: 'sc-h' }, 'Countries I can source from'),
+      el('p', { class: 'muted small' }, 'The bean picker and substitute finder only suggest catalogue origins from these countries. Your saved beans are always included. Leave everything unticked to allow all countries.'),
+      el('div', { class: 'row' },
+        el('button', { class: 'btn ghost', type: 'button', onclick: function () { set(['Indonesia']); } }, 'Indonesia only'),
+        el('button', { class: 'btn ghost', type: 'button', onclick: function () { set(SEA.filter(function (c) { return all.indexOf(c) >= 0; })); } }, 'Southeast Asia'),
+        el('button', { class: 'btn ghost', type: 'button', onclick: function () { set([]); } }, 'All countries')),
+      el('div', { class: 'chips' }, all.map(function (c) {
+        var on = d.indexOf(c) >= 0;
+        return el('label', { class: 'chip', style: on ? 'background:var(--accent-soft);color:var(--accent)' : null },
+          el('input', { type: 'checkbox', id: 'src-' + E.slug(c), checked: on, onchange: function (e) {
+            var i = d.indexOf(c); if (e.target.checked && i < 0) d.push(c); if (!e.target.checked && i >= 0) d.splice(i, 1); render();
+          } }), c + ' ', el('i', null, counts[c]));
+      })),
+      el('div', { class: 'row' },
+        el('button', { class: 'btn primary', type: 'button', onclick: async function () {
+          try { await saveSettings({ sourceCountries: d.slice() }); state.srcDraft = null; pickRes = null; toast(d.length ? 'Sourcing limited to ' + d.length + ' countr' + (d.length > 1 ? 'ies' : 'y') + '.' : 'All countries allowed.'); } catch (e) { /* shown */ }
+        } }, 'Save countries'),
+        el('span', { class: 'muted small' }, d.length ? d.length + ' selected' : 'All countries')));
+  }
+  function tuneSamples() {
+    return state.cuppings.map(function (c) {
+      if (!c.actual || !Object.keys(c.actual).length || !c.items || !c.items.length) return null;
+      var bs = c.items.map(function (it) { return it.beanId ? beanById(it.beanId) : null; });
+      if (bs.some(function (b) { return !b; })) return null;
+      return { beans: bs.map(savedBean), pcts: c.items.map(function (it) { return it.pct; }), brew: c.brew, actual: c.actual };
+    }).filter(Boolean);
+  }
+  function tuneCard() {
+    var samples = tuneSamples();
+    var fit = E.fitBrewBias(samples, rulesNoBias());
+    var cur = state.settings.brewBias || {};
+    var brews = Object.keys(E.BREWS).filter(function (b) { return fit.counts[b] || cur[b]; });
+    function cell(map, b, a) { var v = map[b] && map[b][a]; return v ? (v > 0 ? '+' : '') + nf(v, 2) : '0'; }
+    var changed = JSON.stringify(fit.bias) !== JSON.stringify(cur);
+    return el('section', { class: 'card', 'aria-labelledby': 'tu-h' },
+      el('h3', { id: 'tu-h' }, 'Auto-tune from my cuppings'),
+      el('p', { class: 'muted small' }, 'Compares what you tasted with what the simulator predicted, per way of serving, and corrects its rules for your palate (for example: "with my milk, acidity drops more than expected"). It uses only cuppings of saved beans, needs at least 2 per style, starts cautious and caps each correction at ±1. Bean-by-bean learning you already applied is taken into account, so nothing is counted twice.'),
+      !samples.length ? el('p', { class: 'small' }, 'No usable cupping logs yet. Log cuppings of saved beans in the Cupping log first.') :
+        el('div', { class: 'tablewrap' }, el('table', null,
+          el('thead', null, el('tr', null, el('th', null, 'Served as'), el('th', { class: 'num' }, 'Cuppings'), ATTRS.map(function (a) { return el('th', { class: 'num' }, AL[a] + ' now → new'); }))),
+          el('tbody', null, brews.map(function (b) {
+            return el('tr', null, el('td', null, BREW_SHORT[b] || b), el('td', { class: 'num mono' }, fit.counts[b] || 0),
+              ATTRS.map(function (a) { return el('td', { class: 'num mono' }, cell(cur, b, a) + ' → ' + cell(fit.bias, b, a)); }));
+          })))),
+      el('div', { class: 'row' },
+        el('button', { class: 'btn primary', type: 'button', disabled: !samples.length || !changed, onclick: async function () {
+          try { await saveSettings({ brewBias: fit.bias }); toast('Auto-tune applied. Predictions now include your palate corrections.'); } catch (e) { /* shown */ }
+        } }, 'Apply auto-tune'),
+        Object.keys(cur).length ? el('button', { class: 'btn ghost', type: 'button', onclick: async function () {
+          try { await saveSettings({ brewBias: {} }); toast('Auto-tune reset to the standard rules.'); } catch (e) { /* shown */ }
+        } }, 'Reset to standard rules') : null));
   }
   function presetsCard() {
     var mine = state.settings.customPresets || [];
