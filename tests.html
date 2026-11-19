@@ -78,6 +78,21 @@
     var bad = words.filter(function (w) { return !E.resolveTerm(w, idx); });
     eq(bad, []);
   });
+  test('v5.1 notes follow species and process', function () {
+    var gayo = RD_ORIGINS.filter(function (o) { return o.id === 'id-gayo'; })[0];
+    eq(E.typicalNotes(gayo, 'arabica', 'semi'), gayo.notes, 'main process keeps origin notes');
+    var nat = E.typicalNotes(gayo, 'arabica', 'natural'), full = E.typicalNotes(gayo, 'arabica', 'full'), rob = E.typicalNotes(gayo, 'robusta', 'natural');
+    ok(/berry|dried fruit/.test(nat), 'natural: ' + nat);
+    ok(/citrus|floral/.test(full) && full !== nat, 'washed: ' + full);
+    ok(/dark chocolate|earthy|peanut/.test(rob) && rob !== gayo.notes, 'robusta: ' + rob);
+    ok(E.scoresFor(gayo, 3, 'natural', null, 'robusta').bitterness > E.scoresFor(gayo, 3, 'natural', null, 'arabica').bitterness, 'robusta scores');
+    var bad = [];
+    RD_ORIGINS.forEach(function (o) { ['arabica', 'robusta', 'liberica', 'excelsa'].forEach(function (sp) { E.PROCESS_KEYS.forEach(function (p) {
+      var t = E.typicalNotes(o, sp, p), pn = E.parseNotes(t, idx);
+      if (pn.unknown.length || !pn.known.length) bad.push(o.id + '/' + sp + '/' + p + ': ' + t);
+    }); }); });
+    eq(bad.slice(0, 5), []);
+  });
   test('v5 species share labels', function () {
     eq(E.speciesShare([{ species: 'arabica' }, { species: 'robusta' }], [69, 31]).label, 'Arabica 69% · Robusta 31%');
     eq(E.speciesShare([{ species: 'arabica' }, { species: 'arabica' }], [40, 60]).label, '100% arabica');

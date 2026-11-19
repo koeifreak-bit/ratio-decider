@@ -338,7 +338,53 @@
     return out;
   }
   // Typical scores for an origin at a given roast level, process and varietal.
-  function scoresFor(origin, roast, process, varietal) {
+  // What a species tastes like when the origin row is for a different species (medium roast, natural for non-arabica).
+  var SPECIES_BASE = {
+    arabica: { process: 'Washed', scores: { body: 3.5, acidity: 3, sweetness: 3.5, bitterness: 2 }, notes: 'chocolate, caramel, citrus' },
+    robusta: { process: 'Natural', scores: { body: 4.5, acidity: 1.5, sweetness: 2, bitterness: 4 }, notes: 'dark chocolate, earthy, peanut' },
+    liberica: { process: 'Natural', scores: { body: 3.5, acidity: 2, sweetness: 3, bitterness: 3 }, notes: 'jackfruit, dried fruit, woody' },
+    excelsa: { process: 'Natural', scores: { body: 3.5, acidity: 2.5, sweetness: 3, bitterness: 3 }, notes: 'jackfruit, dried fruit, spice' }
+  };
+  // Notes each process tends to bring out (added) or wash away (dropped), per species.
+  var PROCESS_NOTES = {
+    add: {
+      arabica: { full: ['citrus', 'floral'], semi: ['spice', 'herbal'], natural: ['berry', 'dried fruit'] },
+      robusta: { full: ['cocoa', 'caramel'], semi: ['spice', 'earthy'], natural: ['dark chocolate', 'dried fruit'] },
+      liberica: { full: ['citrus', 'caramel'], semi: ['spice', 'woody'], natural: ['jackfruit', 'dried fruit'] },
+      excelsa: { full: ['citrus', 'caramel'], semi: ['spice', 'woody'], natural: ['jackfruit', 'dried fruit'] }
+    },
+    drop: {
+      full: ['earthy', 'tobacco', 'winey', 'fermented', 'boozy', 'smoky', 'dried fruit', 'jackfruit', 'forest floor', 'leather'],
+      semi: ['jasmine', 'floral', 'lemon', 'citrus', 'bergamot', 'berry', 'winey'],
+      natural: ['lemon', 'grapefruit', 'herbal', 'cedar']
+    }
+  };
+  // The origin row to use for a species: the origin itself, or a stand-in carrying the species' typical profile.
+  function originAs(origin, species) {
+    if (!origin) return null;
+    if (!species || origin.species === species) return origin;
+    var b = SPECIES_BASE[species] || SPECIES_BASE.arabica;
+    return { id: origin.id, country: origin.country, region: origin.region, species: species, process: b.process, altitude: origin.altitude, scores: b.scores, notes: b.notes, standIn: true };
+  }
+  // Typical bag notes for an origin roasted as a given species and process.
+  function typicalNotes(origin, species, process) {
+    var o = originAs(origin, species);
+    if (!o) return '';
+    var sp = o.species || 'arabica';
+    var main = processOf(String(o.process || '').split(/[,;]/)[0]);
+    var p = process || main;
+    var base = String(o.notes || '').split(',').map(function (s) { return s.trim(); }).filter(Boolean);
+    if (p === main) return base.join(', ');
+    var drop = PROCESS_NOTES.drop[p] || [];
+    var keep = base.filter(function (n) { return drop.indexOf(lc(n)) < 0; });
+    var adds = ((PROCESS_NOTES.add[sp] || PROCESS_NOTES.add.arabica)[p] || []).filter(function (n) {
+      return !keep.some(function (k) { return lc(k) === n; });
+    });
+    keep = keep.slice(0, Math.max(2, 5 - adds.length));
+    return keep.concat(adds).slice(0, 5).join(', ');
+  }
+  function scoresFor(origin, roast, process, varietal, species) {
+    origin = originAs(origin, species);
     var main = processOf(String(origin.process || '').split(/[,;]/)[0]);
     var s = scoresForProcess(origin.scores, main, process || main);
     if (varietal) s = scoresForVarietal(s, varietal);
@@ -1419,7 +1465,7 @@
   }
 
   root.RatioEngine = {
-    speciesShare: speciesShare,
+    speciesShare: speciesShare, typicalNotes: typicalNotes, originAs: originAs, SPECIES_BASE: SPECIES_BASE,
     originAllowed: originAllowed, fitBrewBias: fitBrewBias, substitutes: substitutes, similarity: similarity,
     VARIETALS: VARIETALS, ROAST_COLOURS: ROAST_COLOURS, ACID_TYPES: ACID_TYPES, WATER: WATER,
     scoresForVarietal: scoresForVarietal, acidProfile: acidProfile, recipeFor: recipeFor, roastColour: roastColour,

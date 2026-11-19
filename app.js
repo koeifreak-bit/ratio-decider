@@ -93,7 +93,25 @@
   function origins() { return BASE_ORIGINS.concat(state.settings.customOrigins || []); }
   function originById(id) { var all = origins(); for (var i = 0; i < all.length; i++) if (all[i].id === id) return all[i]; return null; }
   function mainProcess(o) { return o ? E.processOf(String(o.process || '').split(/[,;]/)[0]) : 'full'; }
-  function derived(originId, roast, process, varietal) { var o = originById(originId); return o ? E.scoresFor(o, roast, process || mainProcess(o), varietal && varietal !== 'unknown' ? varietal : null) : null; }
+  function derived(originId, roast, process, varietal, species) {
+    var o = originById(originId); if (!o) return null;
+    return E.scoresFor(o, roast, process || mainProcess(E.originAs(o, species)), varietal && varietal !== 'unknown' ? varietal : null, species);
+  }
+  // Same region sold as another species (e.g. Sidikalang arabica ↔ robusta).
+  function siblingOrigin(o, species) {
+    if (!o || o.species === species) return o;
+    return origins().filter(function (x) { return x.species === species && x.country === o.country && x.region.replace(/\s*\(Robusta\)/i, '') === o.region.replace(/\s*\(Robusta\)/i, ''); })[0] || null;
+  }
+  // Swap the notes for the new species / process, unless the user typed their own.
+  // Notes count as "auto" when every one of them came from the previous suggestion or the origin's notes (any order).
+  function noteKeys(text) { return parse(text).known.map(function (n) { return n.key; }); }
+  function autoNotes(current, prev, next) {
+    var po = originById(prev.originId);
+    var allowed = noteKeys(E.typicalNotes(po, prev.species, prev.process) + ', ' + (po ? po.notes : ''));
+    var mine = parse(current || '');
+    var isAuto = !String(current || '').trim() || (!mine.unknown.length && mine.known.every(function (n) { return allowed.indexOf(n.key) >= 0; }));
+    return isAuto ? E.typicalNotes(originById(next.originId), next.species, next.process) : current;
+  }
   function procLabel(p) { return (E.PROCESSES[p] || E.PROCESSES.full).label; }
   function beanProcess(b) { return b.process || mainProcess(originById(b.originId)); }
 
@@ -827,30 +845,38 @@
       }
     } else {
       var rederive = function (prev) {
-        var before = derived(prev.originId, prev.roast, prev.process, prev.varietal);
-        if (!before || sameScores(row.scores, before)) row.scores = derived(row.originId, row.roast, row.process, row.varietal) || row.scores;
+        var before = derived(prev.originId, prev.roast, prev.process, prev.varietal, prev.species);
+        if (!before || sameScores(row.scores, before)) row.scores = derived(row.originId, row.roast, row.process, row.varietal, row.species) || row.scores;
+        row.notesText = autoNotes(row.notesText, prev, row);
       };
-      var snap = function () { return { originId: row.originId, roast: row.roast, process: row.process, varietal: row.varietal }; };
+      var snap = function () { return { originId: row.originId, roast: row.roast, process: row.process, varietal: row.varietal, species: row.species }; };
       body = el('div', { class: 'stack', style: 'gap:8px' },
         el('div', { class: 'grid2' },
           field('Name', el('input', { type: 'text', id: 'row-name-' + row.key, value: row.name, placeholder: 'e.g. Toraja from Roastery X', oninput: function (e) { row.name = e.target.value; simChanged(false); } })),
           field('Origin', originSelect('row-origin-' + row.key, row.originId, function (e) {
-            var prev = snap(), prevO = originById(row.originId), o = originById(e.target.value);
+            var prev = snap(), o = originById(e.target.value);
             row.originId = e.target.value;
-            if (o) {
-              row.species = o.species; row.process = mainProcess(o); rederive(prev);
-              if (!row.notesText || (prevO && row.notesText === prevO.notes)) row.notesText = o.notes;
-            }
+            if (o) { row.species = o.species; row.process = mainProcess(o); rederive(prev); }
             clearMix(); simChanged(true);
           }))),
         el('div', { class: 'grid4' },
-          field('Species', el('select', { id: 'row-sp-' + row.key, value: row.species, onchange: function (e) { row.species = e.target.value; simChanged(true); } }, SPECIES.map(function (s) { return opt(s, s); }))),
+          field('Species', el('select', { id: 'row-sp-' + row.key, value: row.species, onchange: function (e) {
+            var prev = snap(), sib = siblingOrigin(originById(row.originId), e.target.value);
+            row.species = e.target.value;
+            if (sib && sib.id !== row.originId) { row.originId = sib.id; row.process = mainProcess(sib); }
+            rederive(prev); clearMix(); simChanged(true);
+          } }, SPECIES.map(function (s) { return opt(s, s); }))),
           field('Process', processSelect('row-proc-' + row.key, row.process, function (e) { var prev = snap(); row.process = e.target.value; rederive(prev); simChanged(true); })),
           field('Varietal', varietalSelect('row-var-' + row.key, row.varietal, function (e) { var prev = snap(); row.varietal = e.target.value; rederive(prev); simChanged(true); })),
           field('Roast colour', roastSelect('row-roast-' + row.key, row.roast, function (e) { var prev = snap(); row.roast = Number(e.target.value); rederive(prev); simChanged(true); }))),
         field('Cup score (optional, 0–100)', el('input', { type: 'number', id: 'row-cs-' + row.key, min: 0, max: 100, step: 0.25, value: row.cupScore == null ? '' : row.cupScore, placeholder: 'e.g. 85', oninput: function (e) { row.cupScore = e.target.value === '' ? '' : Number(e.target.value); simChanged(false); } }), 'From the roastery\'s spec sheet or your own cupping. Needed for the high-end score check.'),
         field('Notes on the bag', el('input', { type: 'text', id: 'row-notes-' + row.key, value: row.notesText, placeholder: 'e.g. dark chocolate, gula aren, orange', oninput: function (e) { row.notesText = e.target.value; simChanged(false); }, onchange: function () { render(); } })),
         noteChips(row.notesText, { showIgnored: true }),
+        (function () {
+          var typ = E.typicalNotes(originById(row.originId), row.species, row.process);
+          return typ && typ !== row.notesText ? el('button', { class: 'btn ghost', type: 'button', style: 'justify-self:start', onclick: function () { row.notesText = typ; simChanged(true); } },
+            'Use typical ' + row.species + ', ' + procLabel(row.process).toLowerCase() + ' notes: ' + typ) : null;
+        })(),
         el('details', null, el('summary', { class: 'small' }, 'Taste scores (1–5)'),
           el('div', { class: 'grid4', style: 'margin-top:8px' }, ATTRS.map(function (a) {
             return field(AL[a], el('input', { type: 'number', id: 'row-sc-' + a + '-' + row.key, min: 1, max: 5, step: 0.5, value: row.scores[a], oninput: function (e) { var v = Number(e.target.value); if (v >= 1 && v <= 5) { row.scores[a] = v; simChanged(false); } } }));
@@ -1396,13 +1422,15 @@
     clearMix(); saveSimDraft(); go('simulator');
   }
   function beanForm(f) {
-    function snap() { return { originId: f.originId, roast: f.roast, process: f.process, varietal: f.varietal }; }
+    function snap() { return { originId: f.originId, roast: f.roast, process: f.process, varietal: f.varietal, species: f.species }; }
     function rederive(prev) {
-      var before = derived(prev.originId, prev.roast, prev.process, prev.varietal);
-      if (!before || sameScores(f.scores, before)) f.scores = derived(f.originId, f.roast, f.process, f.varietal) || f.scores;
+      var before = derived(prev.originId, prev.roast, prev.process, prev.varietal, prev.species);
+      if (!before || sameScores(f.scores, before)) f.scores = derived(f.originId, f.roast, f.process, f.varietal, f.species) || f.scores;
+      if (f.bagNotes) f.bagNotes = autoNotes(f.bagNotes, prev, f);
       render();
     }
-    var current = derived(f.originId, f.roast, f.process, f.varietal);
+    var current = derived(f.originId, f.roast, f.process, f.varietal, f.species);
+    var typical = E.typicalNotes(originById(f.originId), f.species, f.process);
     var o = originById(f.originId);
     return el('section', { class: 'card', 'aria-labelledby': 'bf-h' },
       el('h3', { id: 'bf-h' }, f.id ? 'Edit ' + (f.name || 'bean') : 'Add a bean'),
@@ -1411,12 +1439,17 @@
         field('Roastery', el('input', { type: 'text', id: 'bf-roastery', value: f.roastery, oninput: function (e) { f.roastery = e.target.value; } }))),
       el('div', { class: 'grid2' },
         field('Origin', originSelect('bf-origin', f.originId, function (e) {
-          var prev = snap(), prevO = originById(f.originId), no = originById(e.target.value);
+          var prev = snap(), no = originById(e.target.value);
           f.originId = e.target.value;
-          if (no) { f.species = no.species; f.process = mainProcess(no); if (f.bagNotes && prevO && f.bagNotes === prevO.notes) f.bagNotes = no.notes; }
+          if (no) { f.species = no.species; f.process = mainProcess(no); }
           rederive(prev);
         }, true)),
-        field('Species', el('select', { id: 'bf-species', value: f.species, onchange: function (e) { f.species = e.target.value; } }, SPECIES.map(function (s) { return opt(s, s); })))),
+        field('Species', el('select', { id: 'bf-species', value: f.species, onchange: function (e) {
+          var prev = snap(), sib = siblingOrigin(originById(f.originId), e.target.value);
+          f.species = e.target.value;
+          if (sib && sib.id !== f.originId) { f.originId = sib.id; f.process = mainProcess(sib); }
+          rederive(prev);
+        } }, SPECIES.map(function (s) { return opt(s, s); })))),
       el('div', { class: 'grid4' },
         field('Process', processSelect('bf-process', f.process, function (e) { var prev = snap(); f.process = e.target.value; rederive(prev); })),
         field('Varietal', varietalSelect('bf-varietal', f.varietal, function (e) { var prev = snap(); f.varietal = e.target.value; rederive(prev); })),
@@ -1428,8 +1461,8 @@
         field('Cup score (0–100)', el('input', { type: 'number', id: 'bf-cup', min: 0, max: 100, step: 0.25, value: f.cupScore == null ? '' : f.cupScore, placeholder: 'e.g. 85,5', oninput: function (e) { f.cupScore = e.target.value === '' ? '' : Number(e.target.value); } }), 'From the roastery or your own cupping'),
         el('span')),
       el('p', { class: 'muted small' }, (E.PROCESSES[f.process] || E.PROCESSES.full).note),
-      field('Notes printed on the bag', el('textarea', { id: 'bf-notes', value: f.bagNotes, placeholder: o ? 'Typical for this origin: ' + o.notes : 'e.g. dark chocolate, gula aren, orange zest', oninput: function (e) { f.bagNotes = e.target.value; }, onchange: function () { render(); } }), 'Type what the roastery printed, in English or Bahasa Indonesia, separated by commas.'),
-      !f.bagNotes && o ? el('button', { class: 'btn ghost', type: 'button', onclick: function () { f.bagNotes = o.notes; render(); } }, 'Use the typical notes for this origin') : null,
+      field('Notes printed on the bag', el('textarea', { id: 'bf-notes', value: f.bagNotes, placeholder: typical ? 'Typical for this ' + f.species + ', ' + procLabel(f.process).toLowerCase() + ': ' + typical : 'e.g. dark chocolate, gula aren, orange zest', oninput: function (e) { f.bagNotes = e.target.value; }, onchange: function () { render(); } }), 'Type what the roastery printed, in English or Bahasa Indonesia, separated by commas.'),
+      typical && f.bagNotes !== typical ? el('button', { class: 'btn ghost', type: 'button', onclick: function () { f.bagNotes = typical; render(); } }, 'Use the typical notes (' + f.species + ', ' + procLabel(f.process).toLowerCase() + ')') : null,
       noteChips(f.bagNotes, { showIgnored: true }),
       el('div', { class: 'grid4' }, ATTRS.map(function (a) {
         return field(AL[a] + ' (1–5)', el('input', { type: 'number', id: 'bf-sc-' + a, min: 1, max: 5, step: 0.5, value: f.scores[a], oninput: function (e) { var v = Number(e.target.value); if (v >= 1 && v <= 5) f.scores[a] = v; }, onchange: function () { render(); } }));
