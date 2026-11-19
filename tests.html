@@ -93,6 +93,109 @@
     }); }); });
     eq(bad.slice(0, 5), []);
   });
+  // ---- audit regressions (engine) ----
+  test('audit pickBeans keeps high-index best fits in the 26-bean pool', function () {
+    // 30 near-fits at low indices, 24 single-attribute extremes, then the two perfect beans at indices 54 and 55.
+    var cands = [], i;
+    for (i = 0; i < 30; i++) cands.push(bean({ name: 'F' + i, scores: { body: 3.25, acidity: 3.25, sweetness: 3.25, bitterness: 2.75 } }));
+    var dirs = [];
+    ['body', 'acidity', 'sweetness', 'bitterness'].forEach(function (a) { dirs.push([a, 1]); dirs.push([a, -1]); });
+    for (i = 0; i < 24; i++) {
+      var d = dirs[Math.floor(i / 3)], sc = {};
+      sc[d[0]] = d[1] > 0 ? 5 - (i % 3) * 0.1 : 1 + (i % 3) * 0.1;
+      cands.push(bean({ name: 'X' + i, scores: sc }));
+    }
+    cands.push(bean({ name: 'GoodA' })); cands.push(bean({ name: 'GoodB' }));
+    var r = E.pickBeans(cands, { ranges: { body: [3, 3], acidity: [3, 3], sweetness: [3, 3], bitterness: [3, 3] } }, { brew: 'filter', index: idx, maxBeans: 2, limit: 3 });
+    ok(r.considered <= 26, 'pool ' + r.considered);
+    eq(r.picks.length ? r.picks[0].ids : null, [54, 55]);
+  });
+  test('audit pickBeans drops species the target forbids before pooling', function () {
+    var cands = [bean({ name: 'R1', species: 'robusta' }), bean({ name: 'L1', species: 'liberica' }), bean({ name: 'A1' }), bean({ name: 'A2', scores: { body: 3.5 } })];
+    var r = E.pickBeans(cands, { specialty: { on: true, arabicaOnly: true } }, { brew: 'filter', index: idx, maxBeans: 2 });
+    ok(r.considered === 2, 'considered ' + r.considered);
+    ok(r.picks.every(function (p) { return p.beans.every(function (b) { return b.species === 'arabica'; }); }));
+  });
+  test('audit evaluateMix enforces arabica-only (liberica too)', function () {
+    var ev = E.evaluateMix([bean({ name: 'A' }), bean({ name: 'L', species: 'liberica' })], [60, 40], { specialty: { on: true, arabicaOnly: true } }, { brew: 'filter', index: idx });
+    eq(ev.status, 'fail');
+    ok(/arabica only/i.test(ev.reasons.join(' ')), ev.reasons.join(' | '));
+  });
+  test('audit inverted roast window is reported as a conflict', function () {
+    var bs = [bean({ name: 'A', roast: 4 }), bean({ name: 'B', roast: 5 })];
+    var t = { ranges: { roast: [4, 5] }, specialty: { on: true, roastWindow: ['1', '2'] } };
+    var r = E.solve(bs, t, { brew: 'filter', index: idx });
+    eq(r.status, 'fail');
+    ok(/don't overlap/.test(r.reasons.join(' ')), r.reasons.join(' | '));
+    ok(/don't overlap/.test(E.evaluateMix(bs, [50, 50], t, { brew: 'filter', index: idx }).reasons.join(' ')));
+  });
+  test('audit solve keeps searching tied mixes when the high-end gate fails the first ones', function () {
+    var bs = [bean({ name: 'Lemon', notesText: 'lemon', cupScore: 85 }), bean({ name: 'Earth', notesText: 'earthy', cupScore: 85 })];
+    var r = E.solve(bs, { specialty: { on: true, arabicaOnly: true, minScore: 84.5 } }, { brew: 'filter', index: idx });
+    ok(r.status !== 'fail', r.status + ': ' + r.reasons.join(' | '));
+    ok(r.best.pcts[0] <= 17 || r.best.pcts[0] >= 90, 'pcts ' + r.best.pcts.join(':'));
+  });
+  test('audit substitutes respect robustaMax', function () {
+    var bs = [bean({ id: 'a', name: 'A' }), bean({ id: 'b', name: 'B', scores: { body: 4 } })];
+    var cand = bean({ id: 'r', name: 'R', species: 'robusta', scores: { body: 4 } });
+    eq(E.substitutes(bs, [50, 50], 1, [cand], { brew: 'kopisusu', index: idx, target: { robustaMax: 0 } }).options.length, 0);
+    ok(E.substitutes(bs, [50, 50], 1, [cand], { brew: 'kopisusu', index: idx, target: {} }).options.length === 1, 'without a limit it is offered');
+  });
+  test('audit masked delicate notes do not satisfy must', function () {
+    var bs = [bean({ name: 'F', roast: 3, notesText: 'jasmine, rose, honeysuckle, lavender, chamomile' }), bean({ name: 'D', roast: 4, notesText: 'dark chocolate, smoky' })];
+    var sim = E.simulateNotes(bs, [20, 80], 'filter');
+    eq(note(sim, 'Jasmine').tier, 'lost');
+    var ev = E.evaluateMix(bs, [20, 80], { must: ['floral', 'jasmine'] }, { brew: 'filter', index: idx });
+    eq(ev.must.map(function (m) { return m.tier; }), ['lost', 'lost']);
+    eq(ev.status, 'fail');
+    ok(/likely lost under bolder notes/.test(ev.reasons.join(' ')), ev.reasons.join(' | '));
+  });
+  test('audit out-of-order note-calibration undo keeps newer learning', function () {
+    var b = { id: 'x', name: 'X', roast: 3, scores: { body: 3, acidity: 3, sweetness: 3, bitterness: 3 }, notes: E.parseNotes('dark chocolate', idx).known };
+    var A = E.calibrateNotes([b], [100], 'filter', [], E.DEFAULTS).x;
+    ok(A && A['dark-chocolate'], 'A learned');
+    b.noteCalib = E.applyNoteCalib({}, A, 1);
+    var B = E.calibrateNotes([b], [100], 'filter', [], E.DEFAULTS).x;
+    b.noteCalib = E.applyNoteCalib(b.noteCalib, B, 1);
+    near(b.noteCalib['dark-chocolate'], 0.64, 1e-6);
+    var undoA = E.applyNoteCalib(b.noteCalib, A, -1);
+    near(undoA['dark-chocolate'], 0.8, 1e-6, 'B kept after undoing A');
+    eq(E.applyNoteCalib(undoA, B, -1), {});
+    near(E.applyNoteCalib({ k: 0.8 }, { k: { from: 1, to: 0.8 } }, -1).k || 1, 1, 1e-6, 'old from/to logs still undo');
+  });
+  test('audit calibrate counts a duplicated saved bean once', function () {
+    var b = bean({ id: 'd', name: 'D', scores: { body: 3 } });
+    var one = E.calibrate([b], [100], { body: 3 }, { body: 4 });
+    var two = E.calibrate([b, b], [50, 50], { body: 3 }, { body: 4 });
+    eq(two.d.body, one.d.body);
+    var n2 = E.calibrateNotes([Object.assign({}, b, { notes: E.parseNotes('dark chocolate', idx).known })].concat([Object.assign({}, b, { notes: E.parseNotes('dark chocolate', idx).known })]), [50, 50], 'filter', []);
+    eq(n2.d['dark-chocolate'].to, 0.8);
+  });
+  test('audit SPLIT_RE is case-insensitive', function () {
+    var p = E.parseNotes('Chocolate WITH Grape AND blorp DAN Lemon', idx);
+    eq(p.known.map(function (n) { return n.key; }).sort(), ['chocolate', 'grape', 'lemon']);
+    eq(p.unknown, ['blorp']);
+  });
+  test('audit acidProfile uses the rules faint threshold', function () {
+    var sim = { notes: [{ key: 'lemon', sub: 'citrus', tier: 'faint', strength: 0.05 }] };
+    eq(E.acidProfile(sim).dominant, null);
+    eq(E.acidProfile(sim, E.withRules({ tiers: { faint: 0.03 } })).dominant, 'citric');
+  });
+  test('audit cuppingPlan has accurate advice for every brew', function () {
+    Object.keys(E.BREWS).forEach(function (b) {
+      var note = E.cuppingPlan([{ pcts: [50, 50] }], { brew: b, rand: function () { return 0.5; } }).brewNote;
+      if (b === 'filter') { eq(note, ''); return; }
+      ok(note.length > 40, b);
+      ok(b === 'tubruk' ? /unfiltered fines/.test(note) : !/unfiltered fines/.test(note), b + ': ' + note);
+    });
+  });
+  test('audit rebalance never exceeds 100% on conflicting bounds', function () {
+    [[[50, 50], 0, 60, [60, 60], [100, 100]], [[30, 30, 40], 1, 50, [0, 80, 0], [100, 50, 100]], [[40, 60], 0, 30, [0, 0], [20, 20]]].forEach(function (c) {
+      var out = E.rebalance(c[0], c[1], c[2], c[3], c[4]);
+      eq(out.reduce(function (s, x) { return s + x; }, 0), 100, JSON.stringify(c));
+      ok(out.every(function (x) { return x >= 0; }), JSON.stringify(out));
+    });
+  });
   test('v5 species share labels', function () {
     eq(E.speciesShare([{ species: 'arabica' }, { species: 'robusta' }], [69, 31]).label, 'Arabica 69% · Robusta 31%');
     eq(E.speciesShare([{ species: 'arabica' }, { species: 'arabica' }], [40, 60]).label, '100% arabica');
@@ -345,14 +448,14 @@
   test('SC29 note learning down, up and undo', function () {
     var g = bean({ id: 'g', roast: 2, notesText: 'jasmine, chocolate' });
     var d = E.calibrateNotes([g], [100], 'filter', E.parseNotes('chocolate', idx).known);
-    eq(d, { g: { jasmine: { from: 1, to: 0.8 } } });
+    eq(d, { g: { jasmine: { from: 1, to: 0.8, factor: 0.8 } } });
     var nc = E.applyNoteCalib({}, d.g, 1); eq(nc, { jasmine: 0.8 });
     g.noteCalib = nc;
     near(E.simulateNotes([g], [100], 'filter').notes.filter(function (n) { return n.key === 'jasmine'; })[0].strength, 0.48);
     eq(E.applyNoteCalib(nc, d.g, -1), {});
     var h = bean({ id: 'h', notesText: 'orange' }), k = bean({ id: 'k', notesText: 'chocolate' });
     var d2 = E.calibrateNotes([h, k], [10, 90], 'filter', E.parseNotes('orange, chocolate', idx).known);
-    eq(d2.h, { orange: { from: 1, to: 1.25 } });
+    eq(d2.h, { orange: { from: 1, to: 1.25, factor: 1.25 } });
   });
   test('SC30 rebalance respects minimums', function () {
     eq(E.rebalance([50, 45, 5], 0, 95, [5, 5, 5], [100, 100, 100]), [90, 5, 5]);

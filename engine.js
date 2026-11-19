@@ -225,7 +225,7 @@
     }
     return -1;
   }
-  var SPLIT_RE = /[,;\/\n&+•·|]|\s-\s|\band\b|\bdan\b|\bwith\b|\bdengan\b|\bserta\b/;
+  var SPLIT_RE = /[,;\/\n&+•·|]|\s-\s|\band\b|\bdan\b|\bwith\b|\bdengan\b|\bserta\b/i;
 
   function parseNotes(text, index) {
     var known = [], unknown = [], ignored = [], seen = {};
@@ -599,6 +599,9 @@
       if (sp.robustaMax != null && sp.robustaMax !== '' && isFinite(sp.robustaMax)) cap = Math.min(cap, Number(sp.robustaMax));
       if (sp.minScore != null && sp.minScore !== '' && isFinite(sp.minScore)) minScore = Number(sp.minScore);
     }
+    // Your roast range and the high-end roast window can't both hold when they don't overlap.
+    var roastConflict = ranges.roast[0] != null && ranges.roast[1] != null && ranges.roast[0] > ranges.roast[1]
+      ? { lo: ranges.roast[0], hi: ranges.roast[1] } : null;
     var cupScores = beans.map(function (b) { return b.cupScore != null && b.cupScore !== '' && isFinite(b.cupScore) ? Number(b.cupScore) : null; });
     var scoreKnown = beans.length > 0 && cupScores.every(function (s) { return s != null; });
     var w = {}, ws = {};
@@ -614,7 +617,7 @@
       w: w, ws: ws, nS: nud.map(function (x) { return x[0]; }), nA: nud.map(function (x) { return x[1]; }),
       roast: beans.map(function (b) { return clampRoast(b.roast); }),
       isRob: beans.map(function (b) { return b.species === 'robusta'; }),
-      cap: cap, ownerCap: ownerCap, sp: sp, minScore: minScore, cupScores: cupScores, scoreKnown: scoreKnown,
+      cap: cap, ownerCap: ownerCap, sp: sp, minScore: minScore, roastConflict: roastConflict, cupScores: cupScores, scoreKnown: scoreKnown,
       mode: mode, useIdx: useIdx, bagG: opts.bagG || 250,
       stock: beans.map(function (b) { return b.stockG != null && isFinite(b.stockG) ? Number(b.stockG) : null; })
     };
@@ -778,7 +781,7 @@
     pair.clashes.filter(function (c) { return c.strong; }).forEach(function (c) { out.push('Flavour clash, ' + c.name.toLowerCase() + ': ' + c.text); });
     if (ctx.brew === 'tonic' && (sim.groups.earthy || 0) + (sim.families.roasted || 0) >= R.tiers.supporting)
       out.push('Earthy and roasted notes clash with tonic or orange: they turn medicinal and harsh. Use brighter, fruit-led beans for this drink.');
-    var acetic = acidProfile(sim).strength.acetic;
+    var acetic = acidProfile(sim, R).strength.acetic;
     if (acetic >= R.tiers.supporting) out.push('Acetic (vinegar-like) acidity at ' + tierOf(acetic, R) + ' strength reads as a fault to specialty cuppers.');
     var lost = sim.notes.filter(function (n) { return n.tier === 'lost'; }).map(function (n) { return n.label.toLowerCase(); });
     if (lost.length) out.push('Likely lost in the cup: ' + joinAnd(lost) + '.');
@@ -800,13 +803,14 @@
     return tried ? round(ok / tried, 2) : 1;
   }
 
-  function acidProfile(sim) {
+  function acidProfile(sim, rules) {
+    var faint = (rules || DEFAULTS).tiers.faint;
     var strength = {}, best = null;
     Object.keys(ACID_TYPES).forEach(function (t) {
       var s = 0;
       sim.notes.forEach(function (n) { if (n.tier !== 'lost' && acidMatches(t, n)) s += n.strength; });
       strength[t] = round(s, 3);
-      if (t !== 'acetic' && s >= DEFAULTS.tiers.faint && (!best || s > strength[best])) best = t;
+      if (t !== 'acetic' && s >= faint && (!best || s > strength[best])) best = t;
     });
     return { strength: strength, dominant: best };
   }
@@ -823,7 +827,12 @@
   }
   function gateCheck(ctx, pcts, sim, form, predicted) {
     var sp = ctx.sp, R = ctx.R, reasons = [], warnings = [];
+    if (ctx.roastConflict) reasons.push(roastConflictText(ctx));
     if (!sp) return { reasons: reasons, warnings: warnings };
+    if (sp.arabicaOnly) {
+      var non = ctx.beans.filter(function (b, i) { return pcts[i] > 0 && b.species !== 'arabica'; }).map(function (b) { return (b.name || 'a bean') + ' (' + (b.species || 'unknown') + ')'; });
+      if (non.length) reasons.push('High-end check: this style is arabica only, but the mix contains ' + joinAnd(non) + '.');
+    }
     if (sp.minScore) {
       if (!predicted) {
         var missing = ctx.beans.filter(function (b, i) { return ctx.cupScores[i] == null; }).map(function (b) { return b.name || 'a bean'; });
@@ -835,13 +844,28 @@
     sim.notes.filter(function (n) { return n.defect && n.tier !== 'lost'; }).forEach(function (n) {
       reasons.push('High-end check: the defect note "' + n.label.toLowerCase() + '" must not be in a specialty cup.');
     });
-    var acetic = acidProfile(sim).strength.acetic;
+    var acetic = acidProfile(sim, R).strength.acetic;
     if (acetic >= R.tiers.faint) reasons.push('High-end check: acetic (vinegar-like) acidity is noticeable. Specialty cafés will reject it.');
     if (sp.minBalance && form.balance < Number(sp.minBalance)) reasons.push('High-end check: balance estimate ' + fmt1(form.balance) + ' is below ' + fmt1(Number(sp.minBalance)) + '.');
     if (sp.minComplexity && form.complexity < Number(sp.minComplexity)) reasons.push('High-end check: complexity estimate ' + fmt1(form.complexity) + ' is below ' + fmt1(Number(sp.minComplexity)) + '. Add a bean that brings another flavour family.');
     return { reasons: reasons, warnings: warnings };
   }
 
+  function roastConflictText(ctx) {
+    var rw = (ctx.sp && ctx.sp.roastWindow) || [];
+    return 'Your roast range and the high-end roast window don\'t overlap: together they ask for roast level ' + fmt1(ctx.roastConflict.lo) + ' or darker and ' +
+      fmt1(ctx.roastConflict.hi) + ' or lighter' + (rw[0] !== '' && rw[0] != null ? ' (window ' + rw[0] + '–' + (rw[1] || '5') + ')' : '') + '. Widen one of them.';
+  }
+  // A must / must-not term as it reaches the cup: notes masked to "lost" don't count.
+  function termInCup(ctx, sim, t) {
+    var s = 0, raw = 0, masked = [];
+    sim.notes.forEach(function (n) {
+      if (!termMatches(t, n)) return;
+      raw += n.strength;
+      if (n.tier === 'lost') { if (n.masked) masked.push(n.label.toLowerCase()); } else s += n.strength;
+    });
+    return { label: t.label, strength: round(s, 3), tier: tierOf(s, ctx.R), raw: round(raw, 3), masked: masked };
+  }
   function evaluateWithCtx(ctx, pcts, limits) {
     var tmp = scoreInto(ctx, pcts, { values: {} });
     var values = {};
@@ -854,16 +878,23 @@
     var hard = hardViolations(ctx, pcts, limits);
     var reasons = hard.length ? hard : tmp.score > 0 ? explainMisses(ctx, tmp.values, pcts) : [];
     reasons = reasons.concat(gate.reasons);
+    var mustIn = ctx.must.map(function (t) { return termInCup(ctx, sim, t); });
+    var mustNotIn = ctx.mustNot.map(function (t) { return termInCup(ctx, sim, t); });
+    // The linear search counts a delicate note even when bolder notes mask it; the cup doesn't.
+    if (!hard.length) mustIn.forEach(function (m) {
+      if (m.raw >= ctx.R.tiers.supporting && m.strength < ctx.R.tiers.supporting)
+        reasons.push(m.label + ' would reach Supporting on paper, but ' + (m.masked.length ? joinAnd(m.masked) + ' is likely lost under bolder notes' : 'it is likely lost under bolder notes') + '.');
+    });
     var warnings = warningsFor(ctx, pcts, sim, pair).concat(gate.warnings);
     var status = reasons.length ? 'fail' : warnings.length ? 'warn' : 'ok';
-    var termStrength = function (t) { var s = 0; for (var i = 0; i < ctx.n; i++) s += pcts[i] / 100 * t.coef[i]; return { label: t.label, strength: round(s, 3), tier: tierOf(s, ctx.R) }; };
     return {
       pcts: pcts.slice(), values: values, notes: sim, pairings: pair, form: form,
-      predicted: predicted, acid: acidProfile(sim), specialty: !!ctx.sp,
+      predicted: predicted, acid: acidProfile(sim, ctx.R), specialty: !!ctx.sp,
       robust: robustness(ctx, pcts, tmp.score), score: tmp.score, status: status,
       headline: status === 'ok' ? 'Possible' : status === 'warn' ? 'Possible with warnings' : 'Not possible',
       reasons: reasons, warnings: warnings, unresolved: ctx.unresolved.slice(),
-      must: ctx.must.map(termStrength), mustNot: ctx.mustNot.map(termStrength), brew: ctx.brew
+      must: mustIn.map(function (m) { return { label: m.label, strength: m.strength, tier: m.tier }; }),
+      mustNot: mustNotIn.map(function (m) { return { label: m.label, strength: m.strength, tier: m.tier }; }), brew: ctx.brew
     };
   }
   function evaluateMix(beans, pcts, target, opts) {
@@ -885,6 +916,7 @@
   }
   function preChecks(ctx, mins, maxs) {
     var pre = [], n = ctx.n, label = BREWS[ctx.brew].label, i;
+    if (ctx.roastConflict) pre.push(roastConflictText(ctx));
     if (sum(mins) > 100) pre.push('The minimum shares add up to ' + sum(mins) + '%, more than 100%.');
     if (sum(maxs) < 100) pre.push('The maximum shares add up to only ' + sum(maxs) + '%.');
     var robMin = 0, allRob = true;
@@ -957,6 +989,7 @@
       scratch.mode = ctx.mode === 'taste' ? 0 : modeKey(ctx, pcts);
     }
     var K = 60, top = [], count = 0, pcts = new Array(n), leafMx = 0, leafMn = 100, roundBest = null;
+    var onLeaf = consider;
     function consider() {
       leafScore(acc[n], leafMx, leafMn);
       count++;
@@ -981,7 +1014,7 @@
         push(idx, remaining);
         leafMx = remaining > mx ? remaining : mx;
         leafMn = remaining < mn ? remaining : mn;
-        consider();
+        onLeaf();
         return;
       }
       var lo = Math.max(mins[idx], remaining - sufMax[idx + 1]);
@@ -1010,6 +1043,27 @@
         lost: ev ? ev.notes.notes.filter(function (x) { return x.tier === 'lost'; }).length : 0
       };
     });
+    // High-end check: the top 60 by target fit can all fail the gate (clashes, defects, balance) while other
+    // equally good mixes pass. Walk every tied mix again and fully evaluate them (bounded budget) until passes are found.
+    if (ctx.sp && !ranked.some(function (x) { return x.ev && x.ev.status !== 'fail'; })) {
+      var tieScore = top[0].score, tieMode = top[0].mode, budget = ctx.R.gateSearchBudget || 1500, found = [], seenP = {};
+      ranked.forEach(function (x) { if (x.ev) seenP[x.p.pcts.join()] = true; });
+      onLeaf = function () {
+        if (budget <= 0 || found.length >= 24) return;
+        leafScore(acc[n], leafMx, leafMn);
+        if (scratch.score !== tieScore || scratch.mode !== tieMode) return;
+        var key = pcts.join();
+        if (seenP[key]) return;
+        budget--;
+        var ev = evaluateWithCtx(ctx, pcts.slice(), limits);
+        if (ev.status === 'fail') return;
+        found.push({ p: { score: scratch.score, center: scratch.center, spread: scratch.spread, mode: scratch.mode, pcts: pcts.slice() }, ev: ev,
+          order: top.length + found.length, r: rank[ev.status], q: ev.form.balance + ev.robust,
+          lost: ev.notes.notes.filter(function (x) { return x.tier === 'lost'; }).length });
+      };
+      rec(0, 100, 0, 0, 100);
+      if (found.length) { ranked = found.concat(ranked); ranked.sort(function (a, b) { return a.r - b.r || b.q - a.q || a.lost - b.lost || a.order - b.order; }); }
+    }
     ranked.sort(function (a, b) { return a.r - b.r || b.q - a.q || a.lost - b.lost || a.order - b.order; });
     var picked = [ranked[0]];
     for (i = 1; i < ranked.length && picked.length < 3; i++) {
@@ -1071,16 +1125,23 @@
     var maxK = clamp(opts.maxBeans || 3, 2, 4), minK = clamp(opts.minBeans || 2, 1, maxK);
     var o1 = Object.assign({}, opts, { mode: 'taste' });
     if (!cands.length) return { picks: [], considered: 0, evals: 0, ms: 0 };
+    var tctx = prepare([], target, o1);
+    // Species the target rules out never enter the pool, so they can't crowd out legal beans.
+    var arabicaOnly = !!(tctx.sp && tctx.sp.arabicaOnly), noRobusta = tctx.cap === 0;
+    function legal(c) { return arabicaOnly ? c.species === 'arabica' : !(noRobusta && c.species === 'robusta'); }
     // 1) Pre-filter: keep beans that fit alone, extremes in the direction the target needs, and carriers of must-taste notes.
-    var singles = cands.map(function (c, i) {
+    var singles = [];
+    cands.forEach(function (c, i) {
+      if (!legal(c)) return;
       var cx = prepare([c], target, o1);
       var s = scoreInto(cx, [100], { values: {} });
-      return { i: i, score: s.score, values: Object.assign({}, s.values), mustC: cx.must.map(function (t) { return t.coef[0]; }) };
+      singles.push({ i: i, score: s.score, values: Object.assign({}, s.values), mustC: cx.must.map(function (t) { return t.coef[0]; }) });
     });
-    var keep = {};
-    function addTop(list, n) { list.slice(0, n).forEach(function (x) { keep[x.i] = true; }); }
-    addTop(singles.slice().sort(function (a, b) { return a.score - b.score; }), 10);
-    var tctx = prepare([], target, o1);
+    if (!singles.length) return { picks: [], considered: 0, evals: 0, ms: Date.now() - t0 };
+    // Priority order is kept (best single fits first), so the 26-bean cut drops the least useful beans.
+    var poolOrder = [], inPool = {};
+    function addTop(list, n) { list.slice(0, n).forEach(function (x) { if (!inPool[x.i]) { inPool[x.i] = true; poolOrder.push(x.i); } }); }
+    addTop(singles.slice().sort(function (a, b) { return a.score - b.score || a.i - b.i; }), 10);
     TARGET_ATTRS.forEach(function (a) {
       var r = tctx.ranges[a];
       if (r[0] != null) addTop(singles.slice().sort(function (x, y) { return y.values[a] - x.values[a]; }), 3);
@@ -1089,7 +1150,7 @@
     (singles[0] ? singles[0].mustC : []).forEach(function (_, k) {
       addTop(singles.filter(function (x) { return x.mustC[k] > 0; }).sort(function (x, y) { return y.mustC[k] - x.mustC[k]; }), 3);
     });
-    var pool = Object.keys(keep).map(Number).slice(0, 26);
+    var pool = poolOrder.slice(0, 26);
     // 2) Coarse search over every subset of the pool.
     var subsets = [], evals = 0;
     for (var k = minK; k <= Math.min(maxK, pool.length); k++) {
@@ -1168,8 +1229,12 @@
   function rebalance(pcts, idx, value, mins, maxs) {
     var n = pcts.length;
     if (n === 1) return [100];
-    mins = mins || pcts.map(function () { return 0; });
-    maxs = maxs || pcts.map(function () { return 100; });
+    mins = (mins || pcts.map(function () { return 0; })).map(function (m) { return clamp(Number(m) || 0, 0, 100); });
+    maxs = (maxs || pcts.map(function () { return 100; })).map(function (m) { return clamp(m == null || !isFinite(m) ? 100 : Number(m), 0, 100); });
+    // Conflicting bounds (minimums over 100%, maximums under 100%, or a min above its max) can't all hold:
+    // drop them rather than return shares that don't add up to 100%.
+    var bad = sum(mins) > 100 || sum(maxs) < 100 || mins.some(function (m, k) { return m > maxs[k]; });
+    if (bad) { mins = pcts.map(function () { return 0; }); maxs = pcts.map(function () { return 100; }); }
     var others = [], i;
     for (i = 0; i < n; i++) if (i !== idx) others.push(i);
     var oMin = 0, oMax = 0;
@@ -1238,7 +1303,15 @@
     ];
     var brewNote = brew === 'filter' ? '' :
       'You plan to serve this as ' + BREWS[brew].label + '. Cupping shows the coffee itself; also brew the winning code as ' + BREWS[brew].label + ' before you commit, because ' +
-      (brew === 'kopisusu' ? 'milk mutes acidity and delicate notes.' : brew === 'espresso' ? 'pressure amplifies body and bitterness.' : 'unfiltered fines add body and bitterness.');
+      ({
+        espresso: 'pressure amplifies body and bitterness.',
+        kopisusu: 'milk (often with palm sugar or condensed milk) mutes acidity and delicate notes, and rewards body and chocolate.',
+        tubruk: 'unfiltered fines add body and bitterness.',
+        flatwhite: 'steamed milk mutes acidity and delicate notes; taste for sweetness and whether the coffee still cuts through.',
+        icedmilk: 'cold milk and ice dull aroma and sweetness; check the coffee still reads clearly once chilled and diluted.',
+        coldbrew: 'long cold extraction lowers acidity and bitterness and pulls chocolate and sweetness forward; bright notes fade.',
+        tonic: 'tonic or orange juice amplifies acidity and bitterness; earthy or roasted notes can turn medicinal.'
+      }[brew] || 'the serving style changes body, acidity and bitterness.');
     return { samples: list, cups: C.cups, doseG: C.doseG, waterMl: C.waterMl, waterC: C.waterC, sampleG: C.sampleG, steps: steps, brewNote: brewNote };
   }
 
@@ -1250,11 +1323,17 @@
       var err = Number(actual[a]) - Number(predicted[a]);
       if (!isFinite(err) || err === 0) return;
       var sh = shares(beans, pcts, a, R);
+      // The same saved bean in two rows is one bean: add up its share, then learn once.
+      var byId = {}, order = [];
       beans.forEach(function (b, i) {
         if (!b.id || b.quick || !(sh[i] > 0)) return;
-        var eff = effScore(b, a);
-        var d = round(clamp(eff + R.learnRate * err * sh[i], 1, 5) - eff, 2);
-        if (d !== 0) { deltas[b.id] = deltas[b.id] || {}; deltas[b.id][a] = d; }
+        if (!byId[b.id]) { byId[b.id] = { b: b, share: 0 }; order.push(b.id); }
+        byId[b.id].share += sh[i];
+      });
+      order.forEach(function (id) {
+        var x = byId[id], eff = effScore(x.b, a);
+        var d = round(clamp(eff + R.learnRate * err * x.share, 1, 5) - eff, 2);
+        if (d !== 0) { deltas[id] = deltas[id] || {}; deltas[id][a] = d; }
       });
     });
     return deltas;
@@ -1265,7 +1344,9 @@
     return out;
   }
   // Note learning: strong predicted notes that weren't tasted get weaker for the beans that carry them;
-  // tasted notes the model under-predicted get stronger. Returns {beanId: {noteKey: {from, to}}}.
+  // tasted notes the model under-predicted get stronger.
+  // Returns {beanId: {noteKey: {from, to, factor}}}; `factor` (to / from) is what gets applied and undone,
+  // so undoing an older cupping keeps the learning from newer ones.
   function calibrateNotes(beans, pcts, brew, tastedKnown, rules) {
     var R = rules || DEFAULTS, L = R.noteLearn, out = {};
     var sim = simulateNotes(beans, pcts, brew, R);
@@ -1274,11 +1355,12 @@
     function set(bi, key, factor) {
       var b = beans[bi];
       if (!b || !b.id || b.quick) return;
+      if (out[b.id] && out[b.id][key]) return; // same saved bean in two rows: learn once
       var from = noteLearned(b, key);
       var to = round(clamp(from * factor, L.min, L.max), 2);
       if (to === from) return;
       out[b.id] = out[b.id] || {};
-      out[b.id][key] = { from: from, to: to };
+      out[b.id][key] = { from: from, to: to, factor: round(to / from, 6) };
     }
     sim.notes.forEach(function (n) {
       var tasted = tastedKeys[n.key] || tastedSubs[n.sub];
@@ -1290,8 +1372,11 @@
   function applyNoteCalib(noteCalib, delta, sign) {
     var out = Object.assign({}, noteCalib || {});
     Object.keys(delta || {}).forEach(function (k) {
-      var v = sign > 0 ? delta[k].to : delta[k].from;
-      if (v === 1) delete out[k]; else out[k] = v;
+      var d = delta[k] || {};
+      var f = d.factor > 0 ? d.factor : d.from > 0 && d.to > 0 ? d.to / d.from : 1; // older logs only stored from/to
+      var cur = out[k] > 0 ? out[k] : 1;
+      var v = round(sign > 0 ? cur * f : cur / f, 4);
+      if (Math.abs(v - 1) < 1e-3) delete out[k]; else out[k] = v;
     });
     return out;
   }
@@ -1432,7 +1517,7 @@
     var cur = evaluateMix(beans, pcts, opts.target || {}, opts);
     var ref = referenceTarget(cur);
     var t = opts.target || {};
-    var target = { ranges: ref.ranges, must: ref.must, mustNot: t.mustNot || [], specialty: t.specialty || null };
+    var target = { ranges: ref.ranges, must: ref.must, mustNot: t.mustNot || [], specialty: t.specialty || null, robustaMax: t.robustaMax };
     var gone = beans[idx];
     var shortlist = (candidates || []).filter(function (c) {
       return beans.every(function (b, i) { return i === idx || !(b.id && c.id && b.id === c.id) && b !== c; });

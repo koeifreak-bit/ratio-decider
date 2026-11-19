@@ -40,6 +40,8 @@
   color-scheme: dark;
 }
 * { box-sizing: border-box; }
+/* Components set display (e.g. .btn is inline-flex), which would otherwise beat the hidden attribute. */
+[hidden] { display: none !important; }
 body { background: var(--bg); color: var(--ink); font-family: var(--font-body); font-size: 15px; line-height: 1.5; }
 body::before { content: ""; position: fixed; inset: 0 0 auto; height: env(safe-area-inset-top, 0px); z-index: 10; background: var(--surface); }
 h1, h2, h3 { font-family: var(--font-display); text-wrap: balance; margin: 0; line-height: 1.2; }
