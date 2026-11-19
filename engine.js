@@ -946,6 +946,12 @@
     };
     if (!n) return fail(['Add at least one bean to the mix.']);
     var bd = bounds(beans, R, limits), mins = bd.mins, maxs = bd.maxs;
+    // step 5 = practical weighing (every share a multiple of 5%); step 1 = exact whole percents.
+    var step = Number(opts.step) === 5 ? 5 : 1;
+    if (step > 1 && n > 1) {
+      mins = mins.map(function (m) { return Math.ceil(m / step) * step; });
+      maxs = maxs.map(function (m) { return Math.floor(m / step) * step; });
+    }
     var pre = preChecks(ctx, mins, maxs);
     if (pre.length) return fail(pre);
 
@@ -1019,7 +1025,8 @@
       }
       var lo = Math.max(mins[idx], remaining - sufMax[idx + 1]);
       var hi = Math.min(maxs[idx], remaining - sufMin[idx + 1]);
-      for (var p = lo; p <= hi; p++) {
+      if (step > 1) lo = Math.ceil(lo / step) * step;
+      for (var p = lo; p <= hi; p += step) {
         var r = rob + (ctx.isRob[idx] ? p : 0);
         if (r > ctx.cap) break;
         pcts[idx] = p;
@@ -1028,7 +1035,7 @@
       }
     }
     rec(0, 100, 0, 0, 100);
-    if (!count) return fail(['No whole-percent mix fits your per-bean limits and the robusta limit of ' + ctx.cap + '% for ' + label + '.']);
+    if (!count) return fail(['No ' + (step > 1 ? step + '%-step' : 'whole-percent') + ' mix fits your per-bean limits and the robusta limit of ' + ctx.cap + '% for ' + label + '.' + (step > 1 ? ' Try the 1% (exact) step.' : '')]);
 
     // Among mixes that hit the target equally well, rank the way a cupper would:
     // clean verdict first, then better balance plus tolerance to weighing error, then fewest lost notes.
@@ -1084,7 +1091,7 @@
     return {
       status: best.status, headline: best.headline, reasons: best.reasons, warnings: best.warnings,
       best: best, alternatives: results.slice(1), round: roundEv,
-      searched: count, ms: Date.now() - t0, unresolved: ctx.unresolved, mode: ctx.mode
+      searched: count, ms: Date.now() - t0, unresolved: ctx.unresolved, mode: ctx.mode, step: step
     };
   }
 
@@ -1382,19 +1389,25 @@
   }
 
   // ---------- recipe card ----------
-  function recipeFor(brew, roast) {
+  // robustaPct: share of robusta in the blend (0–100). Above 20% in espresso-based drinks, run a little cooler and a
+  // little tighter: robusta extracts fast and turns harsh and rubbery when pushed hot and long.
+  function recipeFor(brew, roast, robustaPct) {
     var r = clampRoast(Math.round(Number(roast) || 3)), light = r <= 2, dark = r >= 4;
-    var espTemp = light ? '94–95 °C' : dark ? '90–92 °C' : '92–94 °C';
-    var shot = { dose: '18 g', yield: light ? '40–45 g' : '36 g', ratio: light ? '1:2,2–1:2,5' : '1:2', time: '25–32 s', temp: espTemp, grind: 'Fine; adjust so the shot runs in the time window' };
+    var rob = Number(robustaPct) > 20;
+    var t = light ? [94, 95] : dark ? [90, 92] : [92, 94];
+    if (rob) t = [t[0] - 1, t[1] - 1];
+    var espTemp = t[0] + '–' + t[1] + ' °C';
+    var shot = { dose: '18 g', yield: light ? (rob ? '36–40 g' : '40–45 g') : (rob ? '32 g' : '36 g'), ratio: light ? (rob ? '1:2–1:2,2' : '1:2,2–1:2,5') : (rob ? '1:1,8' : '1:2'),
+      time: rob ? '23–28 s' : '25–32 s', temp: espTemp, grind: 'Fine; adjust so the shot runs in the time window' };
     var espTargets = 'Espresso TDS 8–12% · extraction 18–22%';
     var R = {
       filter: { title: 'Pour-over (V60 / Kalita)', dose: '15 g', yield: '250 g water', ratio: light ? '1:16,7' : '1:15', time: '2:45–3:30 min',
         temp: light ? '94–96 °C' : dark ? '88–91 °C' : '92–94 °C', grind: 'Medium-fine, like table salt',
         extra: 'Bloom with 40 g water for 40 s, then pour in 2–3 slow pulses.', targets: 'TDS 1,15–1,45% · extraction 18–22%' },
       espresso: Object.assign({ title: 'Espresso', extra: 'Taste for sweetness first; grind finer if sour, coarser if bitter or dry.', targets: espTargets }, shot),
-      flatwhite: Object.assign({}, shot, { title: 'Flat white', yield: '32–36 g', extra: 'Add 120–140 ml milk steamed to 55–60 °C with thin, glossy microfoam.', targets: espTargets }),
-      kopisusu: Object.assign({}, shot, { title: 'Kopi susu', yield: '40 g', extra: 'Add 120 ml fresh milk and 20–25 ml gula aren syrup; serve over ice if you like.', targets: espTargets }),
-      icedmilk: Object.assign({}, shot, { title: 'Iced latte / es kopi susu', yield: '34 g', ratio: '1:1,9', extra: 'Pull slightly stronger. Add 150 ml cold milk over 120 g ice, then the espresso on top.', targets: espTargets }),
+      flatwhite: Object.assign({}, shot, { title: 'Flat white', yield: rob ? '30–32 g' : '32–36 g', ratio: rob ? '1:1,7–1:1,8' : '1:1,8–1:2', extra: 'Add 120–140 ml milk steamed to 55–60 °C with thin, glossy microfoam.', targets: espTargets }),
+      kopisusu: Object.assign({}, shot, { title: 'Kopi susu', yield: rob ? '36 g' : '40 g', ratio: rob ? '1:2' : '1:2,2', extra: 'Add 120 ml fresh milk and 20–25 ml gula aren syrup; serve over ice if you like.', targets: espTargets }),
+      icedmilk: Object.assign({}, shot, { title: 'Iced latte / es kopi susu', yield: rob ? '30 g' : '34 g', ratio: rob ? '1:1,7' : '1:1,9', extra: 'Pull slightly stronger. Add 150 ml cold milk over 120 g ice, then the espresso on top.', targets: espTargets }),
       coldbrew: { title: 'Cold brew (concentrate)', dose: '100 g', yield: '800 g filtered water', ratio: '1:8', time: '16–20 hours', temp: '4–8 °C (fridge)', grind: 'Coarse, like raw sugar',
         extra: 'Filter, then dilute 1:1 with water or milk. Keeps 5–7 days chilled.', targets: 'Ready-to-drink TDS about 1,3–1,6%' },
       tonic: Object.assign({}, shot, { title: 'Espresso tonic / espresso orange', extra: 'Fill a glass with ice and 120 ml chilled tonic (or 100 ml fresh orange juice). Pour the espresso slowly on top so it doesn\'t foam over.', targets: espTargets }),
@@ -1403,8 +1416,21 @@
     };
     var out = R[brewOf(brew)] || R.filter;
     out.water = WATER;
-    out.rest = /^(espresso|flatwhite|kopisusu|icedmilk|tonic)$/.test(brewOf(brew)) ? '7–21 days after the roast date' : '5–10 days after the roast date';
+    var shotBased = /^(espresso|flatwhite|kopisusu|icedmilk|tonic)$/.test(brewOf(brew));
+    out.rest = shotBased ? '7–21 days after the roast date' : '5–10 days after the roast date';
+    out.robustaAdjusted = rob && shotBased;
+    if (out.robustaAdjusted) out.extra += ' This blend is ' + Math.round(Number(robustaPct)) + '% robusta, so the shot runs 1 °C cooler and a little shorter: robusta extracts fast and turns harsh when pushed.';
     return out;
+  }
+  // Use up `availableG` grams of bean `beanIdx`: the grams of every bean that keep the ratio.
+  // Partners are rounded to `step` grams (default 1 g); the chosen bean uses exactly what is available.
+  function scaleFromBean(pcts, beanIdx, availableG, step) {
+    var p = Number(pcts && pcts[beanIdx]), g = Number(availableG);
+    if (!(p > 0) || !(g > 0)) return null;
+    var st = Number(step) > 0 ? Number(step) : 1;
+    var total = g * 100 / p;
+    var perBean = pcts.map(function (x, i) { return i === beanIdx ? g : round(Math.round(total * Number(x) / 100 / st) * st, 3); });
+    return { perBean: perBean, totalG: round(sum(perBean), 3), exactTotalG: round(total, 3) };
   }
   function roastColour(roast) { return ROAST_COLOURS[clampRoast(roast)]; }
 
@@ -1550,7 +1576,7 @@
   }
 
   root.RatioEngine = {
-    speciesShare: speciesShare, typicalNotes: typicalNotes, originAs: originAs, SPECIES_BASE: SPECIES_BASE,
+    speciesShare: speciesShare, scaleFromBean: scaleFromBean, typicalNotes: typicalNotes, originAs: originAs, SPECIES_BASE: SPECIES_BASE,
     originAllowed: originAllowed, fitBrewBias: fitBrewBias, substitutes: substitutes, similarity: similarity,
     VARIETALS: VARIETALS, ROAST_COLOURS: ROAST_COLOURS, ACID_TYPES: ACID_TYPES, WATER: WATER,
     scoresForVarietal: scoresForVarietal, acidProfile: acidProfile, recipeFor: recipeFor, roastColour: roastColour,

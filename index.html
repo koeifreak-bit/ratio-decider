@@ -89,7 +89,7 @@ main { max-width: 1200px; margin: 0 auto; padding-left: max(16px, env(safe-area-
 .btn:disabled { opacity: .5; cursor: not-allowed; }
 .field { display: grid; gap: 4px; min-width: 0; }
 .field > span { font-size: .78rem; color: var(--ink-2); font-weight: 600; }
-input[type=text], input[type=number], input[type=search], select, textarea {
+input[type=text], input[type=number], input[type=search], input[type=email], input[type=password], input[type=date], select, textarea {
   width: 100%; min-width: 0; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
 textarea { resize: vertical; min-height: 64px; }
 input[type=number] { font-family: var(--font-mono); }
@@ -192,6 +192,45 @@ details > summary { cursor: pointer; font-weight: 600; }
 .oi { display: flex; flex-wrap: wrap; gap: 4px 10px; font-size: .78rem; color: var(--ink-2); }
 .badge.gi { background: var(--accent-soft); color: var(--accent); text-transform: none; letter-spacing: 0; }
 .badge.new { background: var(--ok-soft); color: var(--ok); }
+/* Flavour picker (sidebar) */
+.fp { display: grid; gap: 6px; max-height: 60vh; overflow-y: auto; padding-right: 2px; }
+.fp-fam { border: 1px solid var(--line); border-radius: 8px; padding: 0; }
+.fp-fam > summary { display: flex; align-items: center; gap: 8px; padding: 8px 10px; list-style: none; }
+.fp-fam > summary::-webkit-details-marker { display: none; }
+.fp-fam > summary::before { content: "▸"; color: var(--ink-2); font-size: .8rem; }
+.fp-fam[open] > summary::before { content: "▾"; }
+.fp-count { background: var(--accent); color: var(--accent-ink); border-radius: 99px; font-size: .72rem; padding: 0 7px; font-weight: 700; }
+.fp-row { display: grid; grid-template-columns: 10px minmax(0, 1fr) auto auto; gap: 6px; align-items: center; padding: 4px 10px; border-top: 1px solid var(--line); font-size: .9rem; }
+.fp-row.fp-all { grid-template-columns: minmax(0, 1fr) auto auto; background: var(--surface-2); }
+.fp-name { min-width: 0; overflow-wrap: anywhere; }
+.fp-name i { font-style: normal; color: var(--ink-2); font-size: .75rem; margin-left: 6px; }
+.tg { border: 1px solid var(--line); background: var(--surface); border-radius: 99px; padding: 3px 10px; font-size: .78rem; font-weight: 700; cursor: pointer; min-height: 30px; min-width: 52px; }
+.tg.must.on { background: var(--ok-soft); color: var(--ok); border-color: var(--ok); }
+.tg.not.on { background: var(--bad-soft); color: var(--bad); border-color: var(--bad); }
+button.chip { cursor: pointer; font: inherit; font-size: .8rem; }
+/* Score source, lots, filters */
+.badge.src-origin { background: var(--warn-soft); color: var(--warn); text-transform: none; letter-spacing: 0; }
+.badge.src-manual { background: var(--surface-2); color: var(--ink-2); text-transform: none; letter-spacing: 0; }
+.badge.src-cupped { background: var(--ok-soft); color: var(--ok); text-transform: none; letter-spacing: 0; }
+.lot { background: var(--surface-2); border-radius: 6px; padding: 2px 8px; font-size: .85rem; font-weight: 600; }
+.filterbar { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r); padding: 8px 10px; }
+.filterbar input[type=search] { flex: 2; }
+.alt { color: var(--ink-2); font-style: italic; }
+th .alt { font-size: .72rem; text-transform: none; letter-spacing: 0; font-weight: 500; }
+.sheet .seller { border-top: 2px solid var(--accent); padding-top: 8px; }
+/* Print: only the spec sheet, clean on white */
+@media print {
+  @page { margin: 14mm; }
+  :root, :root[data-theme="dark"] { --bg: #fff; --surface: #fff; --surface-2: #f3f3f3; --ink: #111; --ink-2: #444; --line: #ccc; --accent: #7a3e1d; --accent-soft: #f2e5db; }
+  body { background: #fff; color: #111; font-size: 12pt; }
+  body::before, .top, .banner, .toast, .no-print, .overlay, main > p.muted, nav { display: none !important; }
+  main { max-width: none; padding: 0; }
+  .card.sheet { border: 0; padding: 0; box-shadow: none; }
+  .sheet .chip { border: 1px solid #ccc; }
+  .tablewrap { overflow: visible; }
+  table, tr { break-inside: avoid; }
+  .label { break-after: avoid; }
+}
 .cmp { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 @media (max-width: 640px) { .cmp { grid-template-columns: minmax(0, 1fr); } }
 .delta-pos { color: var(--ok); } .delta-neg { color: var(--bad); }

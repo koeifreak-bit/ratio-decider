@@ -196,6 +196,49 @@
       ok(out.every(function (x) { return x >= 0; }), JSON.stringify(out));
     });
   });
+  // ---- production features (engine) ----
+  test('prod solve step 5 gives multiples of 5 only; step 1 stays exact', function () {
+    var bs = [bean({ name: 'A', scores: { body: 2 } }), bean({ name: 'B', scores: { body: 5 } }), bean({ name: 'C', scores: { body: 3.5 } })];
+    var r5 = E.solve(bs, { ranges: { body: [3, 3] } }, { brew: 'filter', index: idx, step: 5 });
+    ok(r5.best && r5.best.pcts.every(function (p) { return p % 5 === 0; }), JSON.stringify(r5.best && r5.best.pcts));
+    eq(r5.step, 5);
+    ok([r5.best].concat(r5.alternatives).every(function (a) { return a.pcts.every(function (p) { return p % 5 === 0; }) && a.pcts.reduce(function (s, x) { return s + x; }, 0) === 100; }));
+    var r1 = E.solve([bean({ name: 'A', scores: { body: 2 } }), bean({ name: 'B', scores: { body: 5 } })], { ranges: { body: [3, 3] } }, { brew: 'filter', index: idx, step: 1 });
+    eq(r1.best.pcts, [67, 33]);
+    ok(r5.searched < E.solve(bs, { ranges: { body: [3, 3] } }, { brew: 'filter', index: idx }).searched, 'coarser search');
+  });
+  test('prod step 5 respects odd per-bean limits', function () {
+    var r = E.solve([bean({ name: 'A' }), bean({ name: 'B' })], {}, { brew: 'filter', index: idx, step: 5, limits: [{ min: 12 }, { max: 83 }] });
+    ok(r.best.pcts[0] >= 15 && r.best.pcts[1] <= 80 && r.best.pcts[0] % 5 === 0, r.best.pcts.join(':'));
+  });
+  test('prod recipeFor adjusts espresso-based recipes above 20% robusta', function () {
+    var base = E.recipeFor('espresso', 3, 0), rob = E.recipeFor('espresso', 3, 35);
+    eq(base.temp, '92–94 °C'); eq(rob.temp, '91–93 °C');
+    eq(base.ratio, '1:2'); eq(rob.ratio, '1:1,8');
+    ok(rob.robustaAdjusted && /35% robusta/.test(rob.extra) && !base.robustaAdjusted);
+    eq(E.recipeFor('espresso', 3, 20).ratio, '1:2', '20% exactly is not adjusted');
+    eq(E.recipeFor('icedmilk', 3, 40).ratio, '1:1,7');
+    // Dose × ratio must land on the stated output (18 g dose).
+    ['espresso', 'flatwhite', 'kopisusu', 'icedmilk', 'tonic'].forEach(function (b) { [0, 40].forEach(function (rp) {
+      var rc = E.recipeFor(b, 3, rp), nums = function (s) { return (String(s).match(/\d+(?:,\d+)?/g) || []).map(function (x) { return Number(x.replace(',', '.')); }); };
+      var rs = nums(rc.ratio).filter(function (x) { return x !== 1; }), ys = nums(rc.yield);
+      var lo = 18 * Math.min.apply(null, rs), hi = 18 * Math.max.apply(null, rs);
+      ok(ys.every(function (y) { return y >= lo - 2 && y <= hi + 2; }), b + ' ' + rp + '%: ' + rc.yield + ' vs ' + rc.ratio);
+    }); });
+    var f = E.recipeFor('filter', 3, 60);
+    ok(!f.robustaAdjusted && f.temp === '92–94 °C', 'filter unchanged');
+    eq(E.recipeFor('espresso', 3).ratio, '1:2', 'no share given');
+  });
+  test('prod scaleFromBean uses exactly the remaining grams', function () {
+    var s = E.scaleFromBean([31, 69], 0, 1240);
+    eq(s.perBean, [1240, 2760]); eq(s.totalG, 4000);
+    var s2 = E.scaleFromBean([20, 30, 50], 2, 1000, 5);
+    eq(s2.perBean, [400, 600, 1000]);
+    var s3 = E.scaleFromBean([33, 67], 0, 100, 5);
+    eq(s3.perBean[0], 100); ok(s3.perBean[1] % 5 === 0, String(s3.perBean[1]));
+    eq(E.scaleFromBean([0, 100], 0, 500), null);
+    eq(E.scaleFromBean([50, 50], 1, 0), null);
+  });
   test('v5 species share labels', function () {
     eq(E.speciesShare([{ species: 'arabica' }, { species: 'robusta' }], [69, 31]).label, 'Arabica 69% · Robusta 31%');
     eq(E.speciesShare([{ species: 'arabica' }, { species: 'arabica' }], [40, 60]).label, '100% arabica');

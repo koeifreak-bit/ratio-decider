@@ -134,7 +134,8 @@
       result: null, sig: '', pcts: null, manual: false,
       plan: { 250: 20, 500: 0, 1000: 5 }, cupping: null, saveName: '', busy: false,
       mode: 'taste', useKey: '', pick: { source: 'mine', maxBeans: 3, roast: 3 },
-      acidType: '', specialty: defaultSpecialty(), robustaMax: ''
+      acidType: '', specialty: defaultSpecialty(), robustaMax: '', step: '5',
+      make: { mode: 'bags', customG: '', customCount: 0, totalG: '', useIdx: 0, useG: '', note: '' }
     };
   }
   // A remembered draft can be corrupted or from an older version: start from defaults and keep only what checks out.
@@ -169,6 +170,9 @@
     out.specialty = Object.assign(defaultSpecialty(), obj(out.specialty) ? out.specialty : {});
     out.pick = Object.assign({ source: 'mine', maxBeans: 3, roast: 3 }, obj(out.pick) ? out.pick : {});
     out.robustaMax = out.robustaMax == null ? '' : String(out.robustaMax);
+    out.step = String(s.step) === '1' ? '1' : '5';
+    out.make = Object.assign(defaultSim().make, obj(s.make) ? s.make : {});
+    if (['bags', 'total', 'useup'].indexOf(out.make.mode) < 0) out.make.mode = 'bags';
     out.pcts = Array.isArray(out.pcts) && out.pcts.length === out.rows.length && out.pcts.every(function (p) { return isFinite(p); }) ? out.pcts : null;
     out.manual = !!out.manual;
     return out;
@@ -189,8 +193,20 @@
     return idxCache.index;
   }
   function parse(text) { return E.parseNotes(text, noteIndex()); }
+  // Where a bean's taste scores come from: 'cupped' (corrected by your cupping), 'manual' (you set them) or
+  // 'origin' (the catalogue's typical values, not yet checked on this lot).
+  function scoreSource(b) {
+    if ((b.calibCount || 0) > 0 || Object.keys(b.calib || {}).length || Object.keys(b.noteCalib || {}).length) return 'cupped';
+    if (b.scoreSource === 'manual' || b.scoreSource === 'origin') return b.scoreSource;
+    var d = derived(b.originId, b.roast, b.process || mainProcess(originById(b.originId)), b.varietal, b.species);
+    return d && sameScores(b.scores, d) ? 'origin' : 'manual';
+  }
+  var SOURCE_LABEL = { cupped: 'Cupped', manual: 'Your scores', origin: 'Catalogue estimate' };
+  function sourceBadge(src) {
+    return el('span', { class: 'badge src-' + src, title: src === 'origin' ? 'Scores are typical values for this origin, not checked on this lot yet' : src === 'manual' ? 'Scores you entered' : 'Scores corrected by your cupping' }, SOURCE_LABEL[src]);
+  }
   function savedBean(b) {
-    return { id: b.id, name: b.name, species: b.species, roast: b.roast, process: beanProcess(b), varietal: b.varietal || 'unknown', producer: b.producer || '', altitude: b.altitude || '', originId: b.originId,
+    return { id: b.id, name: b.name, species: b.species, scoreSource: scoreSource(b), roast: b.roast, process: beanProcess(b), varietal: b.varietal || 'unknown', producer: b.producer || '', altitude: b.altitude || '', originId: b.originId,
       cupScore: b.cupScore, scores: b.scores, calib: b.calib, noteCalib: b.noteCalib, notes: parse(b.bagNotes).known, bagNotes: b.bagNotes, stockG: b.stockG };
   }
 
@@ -204,7 +220,9 @@
       rules: Object.assign({}, s.rules || {}), customNotes: Object.assign({}, s.customNotes || {}),
       customOrigins: (s.customOrigins || []).slice(), customPresets: (s.customPresets || []).slice(),
       sourceCountries: Array.isArray(s.sourceCountries) ? s.sourceCountries.filter(function (x) { return typeof x === 'string'; }) : [],
-      brewBias: s.brewBias && typeof s.brewBias === 'object' ? JSON.parse(JSON.stringify(s.brewBias)) : {}
+      brewBias: s.brewBias && typeof s.brewBias === 'object' ? JSON.parse(JSON.stringify(s.brewBias)) : {},
+      seller: { name: s.seller && typeof s.seller.name === 'string' ? s.seller.name : '', contact: s.seller && typeof s.seller.contact === 'string' ? s.seller.contact : '' },
+      lowStockG: s.lowStockG != null && isFinite(s.lowStockG) && Number(s.lowStockG) >= 0 ? Number(s.lowStockG) : 500
     };
   }
   async function initStore() {
@@ -417,7 +435,9 @@
       customOrigins: byId(r.customOrigins, l.customOrigins),
       customPresets: byId(r.customPresets, l.customPresets),
       sourceCountries: r.sourceCountries.concat(l.sourceCountries.filter(function (c) { return r.sourceCountries.indexOf(c) < 0; })),
-      brewBias: bias
+      brewBias: bias,
+      seller: r.seller.name || r.seller.contact ? r.seller : l.seller,
+      lowStockG: remoteS && remoteS.lowStockG != null ? r.lowStockG : l.lowStockG
     });
   }
   async function resolveConflict(choice) {
@@ -629,7 +649,8 @@
     return sim.rows.map(function (row, i) {
       if (row.kind === 'saved') { var b = beanById(row.beanId); return b ? savedBean(b) : null; }
       return { id: null, quick: true, name: row.name || 'Quick bean ' + (i + 1), species: row.species, roast: row.roast, process: row.process, varietal: row.varietal || 'unknown', originId: row.originId,
-        cupScore: row.cupScore === '' ? null : row.cupScore, scores: row.scores, notes: parse(row.notesText).known, bagNotes: row.notesText, stockG: null };
+        cupScore: row.cupScore === '' ? null : row.cupScore, scores: row.scores, notes: parse(row.notesText).known, bagNotes: row.notesText, stockG: null,
+        scoreSource: scoreSource({ originId: row.originId, roast: row.roast, process: row.process, varietal: row.varietal, species: row.species, scores: row.scores }) };
     });
   }
   function rangesFrom(src) {
@@ -645,6 +666,7 @@
       robustaMax: src.robustaMax === '' || src.robustaMax == null ? null : Number(src.robustaMax) };
   }
   function simTarget() { return targetOf(sim); }
+  function simStep() { return sim.step === '1' ? 1 : 5; }
   function simLimits() { return sim.rows.map(function (r) { return { min: r.min === '' ? null : Number(r.min), max: r.max === '' ? null : Number(r.max) }; }); }
   function simBounds() {
     var R = rules(), n = sim.rows.length, lim = simLimits();
@@ -657,11 +679,13 @@
     var useIdx = -1;
     sim.rows.forEach(function (r, i) { if (r.key === sim.useKey) useIdx = i; });
     var mode = sim.mode === 'useup' && useIdx < 0 ? 'taste' : sim.mode;
-    return { brew: sim.brew, rules: rules(), index: noteIndex(), limits: simLimits(), mode: mode, useIdx: useIdx, bagG: 250 };
+    return { brew: sim.brew, rules: rules(), index: noteIndex(), limits: simLimits(), mode: mode, useIdx: useIdx, bagG: 250, step: simStep() };
   }
   function simSig() {
     return JSON.stringify([sim.rows.map(function (r) { var b = r.kind === 'saved' ? beanById(r.beanId) : null; return [r, b && [b.scores, b.calib, b.noteCalib, b.bagNotes, b.roast, b.species, b.process, b.cupScore, b.varietal]]; }),
-      sim.brew, sim.ranges, sim.mustText, sim.notText, sim.mode, sim.useKey, sim.acidType, sim.specialty, sim.robustaMax, state.settings]);
+      sim.brew, sim.ranges, sim.mustText, sim.notText, sim.mode, sim.useKey, sim.acidType, sim.specialty, sim.robustaMax, sim.step,
+      // Seller details and the low-stock warning don't change the cup, so they never make a result stale.
+      Object.assign({}, state.settings, { seller: null, lowStockG: null })]);
   }
   function simReady() { return sim.rows.length > 0 && simBeans().every(Boolean); }
   function currentEval() {
@@ -783,15 +807,55 @@
         return el('label', null, el('input', { type: 'radio', name: 'wmode' + (wheelUI.big ? 'b' : ''), value: o[0], checked: wheelUI.mode === o[0], onchange: function () { wheelUI.mode = o[0]; render(); } }), el('span', null, o[1]));
       }));
   }
+  // Flavour picker: the wheel's notes as readable, searchable rows, grouped by family, with Must / Must not toggles.
+  var PICKER_GROUPS = [
+    ['Floral', ['Floral']], ['Fruit', ['Fruit']], ['Cocoa', ['Cocoa']], ['Nutty', ['Nutty']], ['Sweet', ['Sweet']],
+    ['Spice', ['Spice']], ['Roasted', ['Roasted']], ['Herbal / Vegetal', ['Herbal', 'Vegetal']], ['Fermented / Savoury', ['Fermented', 'Savoury']]
+  ];
+  var pickerUI = { q: '', open: {} };
+  function setTerm(kind, name) {
+    // kind: 'must' | 'not' | '' (remove from both)
+    var on = kind === 'must' ? !termHas(sim.mustText, name) : kind === 'not' ? !termHas(sim.notText, name) : false;
+    sim.mustText = termToggle(sim.mustText, name, kind === 'must' && on);
+    sim.notText = termToggle(sim.notText, name, kind === 'not' && on);
+    simChanged(true);
+  }
+  function termToggleButtons(name, label) {
+    var isMust = termHas(sim.mustText, name), isNot = termHas(sim.notText, name);
+    return [
+      el('button', { type: 'button', class: 'tg must' + (isMust ? ' on' : ''), 'aria-pressed': isMust ? 'true' : 'false', 'aria-label': 'Must taste ' + label, onclick: function () { setTerm('must', name); } }, isMust ? '✓ Must' : 'Must'),
+      el('button', { type: 'button', class: 'tg not' + (isNot ? ' on' : ''), 'aria-pressed': isNot ? 'true' : 'false', 'aria-label': 'Must not taste ' + label, onclick: function () { setTerm('not', name); } }, isNot ? '✕ Not' : 'Not')
+    ];
+  }
   function wheelCard() {
     var musts = E.splitTerms(sim.mustText), nots = E.splitTerms(sim.notText);
+    var q = pickerUI.q.trim().toLowerCase();
+    var groups = PICKER_GROUPS.map(function (g) {
+      var notes = [];
+      WHEEL.filter(function (f) { return g[1].indexOf(f[0]) >= 0; }).forEach(function (f) {
+        f[2].forEach(function (grp) { grp[2].forEach(function (nt) { notes.push({ name: nt[0], color: nt[1], group: grp[0] || f[0] }); }); });
+      });
+      if (q) notes = notes.filter(function (n) { return n.name.toLowerCase().indexOf(q) >= 0 || n.group.toLowerCase().indexOf(q) >= 0 || g[0].toLowerCase().indexOf(q) >= 0; });
+      return { label: g[0], fam: g[1][0], notes: notes, active: notes.filter(function (n) { return termHas(sim.mustText, n.name) || termHas(sim.notText, n.name); }).length };
+    }).filter(function (g) { return g.notes.length; });
     return el('section', { class: 'card wheel-card', 'aria-labelledby': 'wh-h' },
-      el('div', { class: 'row' }, el('h2', { id: 'wh-h' }, 'Flavour wheel'), el('span', { class: 'spacer' }),
-        el('button', { class: 'btn ghost', type: 'button', onclick: function () { wheelUI.big = true; render(); } }, 'Open large')),
-      el('p', { class: 'muted small' }, 'Family · group · note. Tap a note to add it to the cup you want; tap again to remove it.'),
-      wheelModeSeg(),
-      el('div', { class: 'wheel-wrap' }, wheelEl(Math.max(260, Math.min(320, window.innerWidth - 64)))),
-      el('div', { class: 'chips' }, musts.map(function (t) { return el('span', { class: 'chip must' }, '✓ ' + t); }), nots.map(function (t) { return el('span', { class: 'chip not' }, '✕ ' + t); })));
+      el('div', { class: 'row' }, el('h2', { id: 'wh-h' }, 'Flavours'), el('span', { class: 'spacer' }),
+        el('button', { class: 'btn ghost', type: 'button', onclick: function () { wheelUI.big = true; render(); } }, 'Open large wheel')),
+      el('p', { class: 'muted small' }, 'Must = reaches at least Supporting in the cup. Not = stays Faint or below.'),
+      musts.length || nots.length ? el('div', { class: 'chips', 'aria-label': 'Chosen flavours' },
+        musts.map(function (t) { return el('button', { type: 'button', class: 'chip must', title: 'Remove', onclick: function () { setTerm('', t); } }, '✓ ' + t + ' ×'); }),
+        nots.map(function (t) { return el('button', { type: 'button', class: 'chip not', title: 'Remove', onclick: function () { setTerm('', t); } }, '✕ ' + t + ' ×'); }))
+        : el('p', { class: 'muted small' }, 'Nothing chosen yet.'),
+      el('input', { type: 'search', id: 'fp-q', value: pickerUI.q, placeholder: 'Search a flavour, e.g. orange, caramel', 'aria-label': 'Search flavours', oninput: function (e) { pickerUI.q = e.target.value; render(); } }),
+      groups.length ? el('div', { class: 'fp' }, groups.map(function (g) {
+        var open = !!q || !!pickerUI.open[g.label];
+        return el('details', { class: 'fp-fam', open: open ? true : null, ontoggle: function (e) { pickerUI.open[g.label] = e.target.open; } },
+          el('summary', null, el('span', null, g.label), g.active ? el('span', { class: 'fp-count' }, g.active) : null, el('span', { class: 'spacer' }), el('span', { class: 'muted small' }, g.notes.length)),
+          el('div', { class: 'fp-row fp-all' }, el('span', { class: 'fp-name' }, 'Whole ' + g.label.split(' /')[0].toLowerCase() + ' family'), termToggleButtons(g.fam, g.label + ' family')),
+          g.notes.map(function (n) {
+            return el('div', { class: 'fp-row' }, el('span', { class: 'dot', style: 'background:' + n.color }), el('span', { class: 'fp-name' }, n.name, el('i', null, n.group)), termToggleButtons(n.name, n.name));
+          }));
+      })) : el('p', { class: 'muted small' }, 'No flavour matches "' + pickerUI.q + '". You can still type any note in Must taste.'));
   }
   function wheelOverlay() {
     if (!wheelUI.big) return null;
@@ -882,6 +946,11 @@
           return el('label', null, el('input', { type: 'radio', name: 'robmax', id: 'robmax-' + (o[0] || 'any'), value: o[0], checked: String(sim.robustaMax) === o[0], onchange: function () { sim.robustaMax = o[0]; simChanged(true); } }), el('span', null, o[1]));
         })),
         el('span', { class: 'muted small' }, 'Limit used: ' + Math.min(R.robustaCap[sim.brew], sim.robustaMax === '' ? 100 : Number(sim.robustaMax)) + '% robusta (' + (BREW_SHORT[sim.brew] || sim.brew) + ' style allows ' + R.robustaCap[sim.brew] + '%). Every result shows its arabica / robusta share.')),
+      el('div', { class: 'stack', style: 'gap:6px' }, el('span', { class: 'label', id: 'step-l' }, 'Ratio step'),
+        el('div', { class: 'seg', role: 'radiogroup', 'aria-labelledby': 'step-l' }, [['5', '5% (practical)'], ['1', '1% (exact)']].map(function (o) {
+          return el('label', null, el('input', { type: 'radio', name: 'ratiostep', id: 'step-' + o[0], value: o[0], checked: sim.step === o[0], onchange: function () { sim.step = o[0]; clearMix(); simChanged(true); } }), el('span', null, o[1]));
+        })),
+        el('span', { class: 'muted small' }, sim.step === '1' ? 'Exact whole percents, e.g. 31 : 69. Best for fine-tuning a house blend.' : 'Every share is a multiple of 5%, e.g. 30 : 70. Easier to weigh on the packing table.')),
       el('div', { class: 'tablewrap' }, el('table', null,
         el('thead', null, el('tr', null, el('th', null, 'As served'), el('th', null, 'From'), el('th', null, 'To'))),
         el('tbody', null, TATTRS.map(function (a) {
@@ -1055,7 +1124,7 @@
     render();
     setTimeout(function () {
       var t = simTarget();
-      state.subs.res = E.substitutes(beans, sim.pcts, i, cands, { brew: sim.brew, rules: rules(), index: noteIndex(), target: t, limit: 3, shortlist: 12 });
+      state.subs.res = E.substitutes(beans, sim.pcts, i, cands, { brew: sim.brew, rules: rules(), index: noteIndex(), target: t, limit: 3, shortlist: 12, step: simStep() });
       state.subs.busy = false; render();
     }, 30);
   }
@@ -1095,7 +1164,7 @@
     }
     pickBusy = true; render();
     setTimeout(function () {
-      pickRes = E.pickBeans(cands, simTarget(), { brew: sim.brew, rules: rules(), index: noteIndex(), maxBeans: Number(sim.pick.maxBeans) || 3, limit: 5 });
+      pickRes = E.pickBeans(cands, simTarget(), { brew: sim.brew, rules: rules(), index: noteIndex(), maxBeans: Number(sim.pick.maxBeans) || 3, limit: 5, step: simStep() });
       pickBusy = false; render();
     }, 30);
   }
@@ -1185,6 +1254,17 @@
     var s = E.speciesShare(beans, pcts);
     return el('span', { class: 'pill species ' + (s.pure === 'arabica' ? 'ara' : 'mixed'), title: 'Species in this blend' }, s.label);
   }
+  // How far to trust this prediction: catalogue estimates haven't been checked on the actual lot yet.
+  function confidenceLine(beans) {
+    var est = beans.filter(function (b) { return b.scoreSource === 'origin'; });
+    var cupped = beans.filter(function (b) { return b.scoreSource === 'cupped'; });
+    if (!est.length) return el('div', { class: 'row tight small' }, el('span', { class: 'pill ok' }, cupped.length === beans.length ? '✓ All beans cupped' : '✓ No catalogue estimates'),
+      el('span', { class: 'muted' }, beans.map(function (b) { return b.name + ': ' + SOURCE_LABEL[b.scoreSource || 'manual'].toLowerCase(); }).join(' · ')));
+    return el('div', { class: 'row tight small' }, el('span', { class: 'pill warn' }, 'Lower confidence'),
+      el('span', null, joinNames(est) + (est.length > 1 ? ' still run' : ' still runs') + ' on catalogue estimates, not this lot. ' +
+        (est.some(function (b) { return !b.quick; }) ? 'Cup ' + (est.length > 1 ? 'them' : 'it') + ' (My beans → Cup this bean) to confirm.' : 'Save quick beans under My beans and cup them to confirm.')));
+  }
+  function joinNames(list) { var n = list.map(function (b) { return b.name; }); return n.length > 1 ? n.slice(0, -1).join(', ') + ' and ' + n[n.length - 1] : n[0]; }
   function shareBlock(beans, pcts) {
     var s = E.speciesShare(beans, pcts);
     var col = { arabica: 'var(--ara)', robusta: 'var(--rob)', liberica: 'var(--warn)', excelsa: 'var(--warn)' };
@@ -1209,7 +1289,7 @@
     return out;
   }
   function recipeBlock(ev) {
-    var r = E.recipeFor(sim.brew, ev.values.roast), c = E.roastColour(ev.values.roast);
+    var r = E.recipeFor(sim.brew, ev.values.roast, E.speciesShare(simBeans(), sim.pcts).robusta), c = E.roastColour(ev.values.roast);
     var rows = [['Dose', r.dose], ['Output', r.yield], ['Ratio', r.ratio], ['Water temp', r.temp], ['Time', r.time], ['Grind', r.grind]];
     return el('section', { class: 'card', 'aria-labelledby': 'rc-h' },
       el('div', { class: 'row' }, el('h3', { id: 'rc-h' }, 'Recipe card: ' + r.title), el('span', { class: 'spacer' }), el('span', { class: 'muted small' }, c.name + ' roast (Agtron ' + c.agtron + ')')),
@@ -1226,7 +1306,7 @@
     return el('section', { class: 'verdict ' + ev.status, 'aria-label': 'Verdict' },
       el('div', { class: 'row' }, statusPill(ev.status, ev.headline), ev.status !== 'fail' ? robustPill(ev.robust) : null, qualityPills(ev), el('span', { class: 'spacer' }),
         el('span', { class: 'muted small mono' }, sim.manual ? 'Your adjusted mix' : res.searched ? 'Best of ' + nf(res.searched) + ' mixes · ' + nf(res.ms) + ' ms' : 'From a saved blend or pick')),
-      ratioText(sim.pcts), ratioBar(sim.pcts), legend(beans, sim.pcts), shareBlock(beans, sim.pcts),
+      ratioText(sim.pcts), ratioBar(sim.pcts), legend(beans, sim.pcts), shareBlock(beans, sim.pcts), confidenceLine(beans),
       modeNote ? el('p', { class: 'muted small' }, modeNote) : null,
       round ? el('div', { class: 'row small' }, el('span', null, 'Rounder option: ', el('b', { class: 'mono' }, round.pcts.join(' : ')), ', also ' + round.headline.toLowerCase() + '. Easier to weigh.'),
         el('button', { class: 'btn ghost', type: 'button', onclick: function () { sim.pcts = round.pcts.slice(); sim.manual = true; simChanged(true); } }, 'Use ' + round.pcts.join(' : '))) : null,
@@ -1350,6 +1430,23 @@
     if (plan.brewNote) wrap.appendChild(el('p', { class: 'small' }, plan.brewNote));
     return wrap;
   }
+  // Intake cupping: one saved bean at 100%, cupped like an SCA cupping (filter-style), to check this lot against its bag.
+  function startBeanCupping(b) {
+    var sb = savedBean(b);
+    var ev = E.evaluateMix([sb], [100], {}, { brew: 'filter', rules: rules(), index: noteIndex() });
+    state.cupDraft = cupDraftFrom([sb], [100], ev, 'filter', '', b.name + ' (intake)');
+    go('cupping'); window.scrollTo(0, 0);
+  }
+  function cupDraftFrom(beans, pcts, ev, brew, code, name) {
+    return {
+      code: code || '', brew: brew, blendName: name || '',
+      items: beans.map(function (b, i) { return { beanId: b.id || null, name: b.name, pct: pcts[i], quick: !!b.quick, species: b.species, roast: b.roast, process: b.process }; }),
+      predicted: { body: ev.values.body, acidity: ev.values.acidity, sweetness: ev.values.sweetness, bitterness: ev.values.bitterness },
+      predictedNotes: ev.notes.notes.filter(function (n) { return n.tier === 'dominant' || n.tier === 'supporting'; }).map(function (n) { return n.label; }),
+      actual: { body: '', acidity: '', sweetness: '', bitterness: '' }, tastedNotes: '', clean: true, defects: '', overall: '', scaScore: '',
+      form: 'simple', cva: { fragrance: '', aroma: '', flavour: '', aftertaste: '', acidity: '', sweetness: '', mouthfeel: '', bitterness: '', liking: '' }
+    };
+  }
   function startCupDraft(code, pcts) {
     var beans = simBeans();
     var ev = E.evaluateMix(beans, pcts, simTarget(), solveOpts());
@@ -1364,32 +1461,88 @@
     go('cupping');
   }
   var planTimer;
+  function makeState() {
+    // Always the same object: the inputs write to it and the plan reads from it.
+    var dflt = { mode: 'bags', customG: '', customCount: 0, totalG: '', useIdx: 0, useG: '', note: '' };
+    var m = sim.make && typeof sim.make === 'object' ? sim.make : (sim.make = {});
+    Object.keys(dflt).forEach(function (k) { if (m[k] === undefined) m[k] = dflt[k]; });
+    if (!(m.useIdx >= 0 && m.useIdx < sim.rows.length)) m.useIdx = 0;
+    return m;
+  }
+  function planRows() {
+    var m = makeState(), rows = BAGS.map(function (g) { return { bagG: g, count: sim.plan[g] || 0 }; });
+    var cg = Math.round(Number(m.customG));
+    if (cg > 0 && BAGS.indexOf(cg) < 0) rows.push({ bagG: cg, count: Math.max(0, Math.floor(Number(m.customCount) || 0)) });
+    return rows;
+  }
+  // The grams to weigh, for whichever way you are packing today.
+  function makePlan(beans) {
+    var m = makeState();
+    if (m.mode === 'total') {
+      var tg = Math.round(Number(m.totalG));
+      return tg > 0 ? { perBean: E.weighOut(sim.pcts, tg, 1), totalG: tg } : { perBean: sim.pcts.map(function () { return 0; }), totalG: 0, empty: 'Enter the total weight you want to pack.' };
+    }
+    if (m.mode === 'useup') {
+      var b = beans[m.useIdx], g = m.useG === '' ? (b && b.stockG != null ? b.stockG : '') : Number(m.useG);
+      var r = E.scaleFromBean(sim.pcts, m.useIdx, g, 1);
+      return r ? { perBean: r.perBean, totalG: r.totalG, useG: Number(g) } : { perBean: sim.pcts.map(function () { return 0; }), totalG: 0, empty: b && !(sim.pcts[m.useIdx] > 0) ? b.name + ' is 0% of this mix.' : 'Enter how many grams of ' + (b ? b.name : 'the bean') + ' to use up.' };
+    }
+    return E.planWeighOut(sim.pcts, planRows());
+  }
+  function nextLot() {
+    var d = new Date(), prefix = String(d.getFullYear()).slice(2) + String(d.getMonth() + 1).padStart(2, '0') + String(d.getDate()).padStart(2, '0') + '-';
+    var n = 0;
+    state.batches.forEach(function (t) { var mm = t.lot && t.lot.indexOf(prefix) === 0 ? Number(t.lot.slice(prefix.length)) : 0; if (mm > n) n = mm; });
+    return prefix + String(n + 1).padStart(2, '0');
+  }
   function makeBlock(beans) {
-    var pw = E.planWeighOut(sim.pcts, BAGS.map(function (g) { return { bagG: g, count: sim.plan[g] || 0 }; }));
+    var m = makeState();
+    var pw = makePlan(beans);
     var allSaved = beans.every(function (b) { return !b.quick; });
     // Stock is per saved bean, so add up every row that uses the same bean.
     var need = gramsByBean(beans, pw.perBean);
     var short = beans.map(function (b) { return b.stockG == null ? null : Math.max(0, (b.id ? need[b.id] : 0) - b.stockG); });
     var anyShort = short.some(function (s) { return s > 0; });
-    var maxRows = BAGS.map(function (g) {
-      var m = allSaved ? E.maxBags(sim.pcts, g, beans.map(function (b) { return b.stockG || 0; })) : null;
+    function later() { saveSimDraft(); clearTimeout(planTimer); planTimer = setTimeout(render, 350); }
+    var sizes = BAGS.slice(); var cg = Math.round(Number(m.customG)); if (cg > 0 && sizes.indexOf(cg) < 0) sizes.push(cg);
+    var maxRows = sizes.map(function (g) {
+      var mb = allSaved ? E.maxBags(sim.pcts, g, beans.map(function (b) { return b.stockG || 0; })) : null;
       var per = E.weighOut(sim.pcts, g);
       return el('tr', null, el('td', null, bagLabel(g)),
         beans.map(function (b, i) { return el('td', { class: 'num mono' }, fmtG(per[i])); }),
-        el('td', { class: 'num mono' }, m && m.bags != null ? nf(m.bags) : '—'),
-        el('td', null, m && m.limiting >= 0 ? beans[m.limiting].name : allSaved ? '' : 'Save the beans to check stock'));
+        el('td', { class: 'num mono' }, mb && mb.bags != null ? nf(mb.bags) : '—'),
+        el('td', null, mb && mb.limiting >= 0 ? beans[mb.limiting].name : allSaved ? '' : 'Save the beans to check stock'));
     });
+    var modeSeg = el('div', { class: 'seg', role: 'radiogroup', 'aria-label': 'How you are packing' },
+      [['bags', 'Bag plan'], ['total', 'Target batch weight'], ['useup', 'Use up a bean']].map(function (o) {
+        return el('label', null, el('input', { type: 'radio', name: 'mk-mode', id: 'mk-mode-' + o[0], value: o[0], checked: m.mode === o[0], onchange: function () { m.mode = o[0]; saveSimDraft(); render(); } }), el('span', null, o[1]));
+      }));
+    var inputs;
+    if (m.mode === 'total') {
+      inputs = el('div', { class: 'row' }, field('Total to pack (grams)', el('input', { type: 'number', id: 'mk-total', min: 0, step: 50, value: m.totalG, placeholder: 'e.g. 3500', style: 'width:160px', oninput: function (e) { m.totalG = e.target.value; later(); } }), '3500 = 3,5 kg. Every bean is weighed to the gram.'));
+    } else if (m.mode === 'useup') {
+      var ub = beans[m.useIdx];
+      inputs = el('div', { class: 'grid2' },
+        field('Bean to use up', el('select', { id: 'mk-use', value: String(m.useIdx), onchange: function (e) { m.useIdx = Number(e.target.value); m.useG = ''; saveSimDraft(); render(); } }, beans.map(function (b, i) { return opt(String(i), b.name + ' (' + sim.pcts[i] + '%)'); }))),
+        field('Grams of it left', el('input', { type: 'number', id: 'mk-useg', min: 0, step: 10, value: m.useG === '' ? (ub && ub.stockG != null ? ub.stockG : '') : m.useG, style: 'width:160px', oninput: function (e) { m.useG = e.target.value; later(); } }),
+          ub && ub.stockG != null ? 'Starts at its current stock (' + fmtG(ub.stockG) + ').' : 'Quick beans have no stock: type the grams.'));
+    } else {
+      inputs = el('div', { class: 'row' }, el('span', { class: 'label' }, 'Bag plan'), BAGS.map(function (g) {
+        return el('label', { class: 'row tight small' }, el('input', { type: 'number', id: 'plan-' + g, min: 0, value: sim.plan[g] || 0, style: 'width:80px', oninput: function (e) {
+          sim.plan[g] = Math.max(0, Math.floor(Number(e.target.value) || 0)); later();
+        } }), '× ' + bagLabel(g));
+      }), el('label', { class: 'row tight small' },
+        el('input', { type: 'number', id: 'plan-cn', min: 0, value: m.customCount || 0, style: 'width:70px', 'aria-label': 'Number of custom bags', oninput: function (e) { m.customCount = Math.max(0, Math.floor(Number(e.target.value) || 0)); later(); } }), '×',
+        el('input', { type: 'number', id: 'plan-cg', min: 0, step: 10, value: m.customG, placeholder: 'e.g. 100', style: 'width:90px', 'aria-label': 'Custom bag size in grams', oninput: function (e) { m.customG = e.target.value; later(); } }), 'g custom bag'));
+    }
     return el('section', { class: 'card', 'aria-labelledby': 'mk-h' },
       el('h3', { id: 'mk-h' }, 'Make it'),
-      el('div', { class: 'tablewrap' }, el('table', null,
+      modeSeg, inputs,
+      m.mode === 'useup' && pw.totalG ? el('p', { class: 'small' }, 'Makes ' + fmtKg(pw.totalG) + ' in total: ' + [250, 500, 1000].map(function (g) { return nf(Math.floor(pw.totalG / g)) + ' × ' + bagLabel(g); }).join(' or ') + '.') : null,
+      pw.empty ? el('p', { class: 'muted small' }, pw.empty) : null,
+      m.mode === 'bags' ? el('div', { class: 'tablewrap' }, el('table', null,
         el('thead', null, el('tr', null, el('th', null, 'Per bag'), beans.map(function (b, i) { return el('th', { class: 'num' }, el('span', { class: 'dot', style: 'background:' + BEAN_COLORS[i] }), ' ', b.name); }), el('th', { class: 'num' }, 'Max bags'), el('th', null, 'Runs out first'))),
-        el('tbody', null, maxRows))),
-      el('div', { class: 'row' }, el('span', { class: 'label' }, 'Bag plan'), BAGS.map(function (g) {
-        return el('label', { class: 'row tight small' }, el('input', { type: 'number', id: 'plan-' + g, min: 0, value: sim.plan[g] || 0, style: 'width:80px', oninput: function (e) {
-          sim.plan[g] = Math.max(0, Math.floor(Number(e.target.value) || 0)); saveSimDraft();
-          clearTimeout(planTimer); planTimer = setTimeout(render, 350);
-        } }), '× ' + bagLabel(g));
-      })),
+        el('tbody', null, maxRows))) : null,
       el('div', { class: 'tablewrap' }, el('table', null,
         el('thead', null, el('tr', null, el('th', null, 'Bean'), el('th', { class: 'num' }, 'Weigh out'), el('th', { class: 'num' }, 'In stock'), el('th', { class: 'num' }, 'Short by'))),
         el('tbody', null, beans.map(function (b, i) {
@@ -1397,6 +1550,8 @@
             el('td', { class: 'num mono' }, b.stockG == null ? '—' : fmtG(b.stockG)),
             el('td', { class: 'num mono' + (short[i] > 0 ? ' delta-neg' : '') }, short[i] == null ? '—' : short[i] > 0 ? fmtG(short[i]) : '0 g'));
         }), el('tr', null, el('td', null, el('b', null, 'Total')), el('td', { class: 'num mono' }, el('b', null, fmtKg(pw.totalG))), el('td'), el('td'))))),
+      allSaved ? el('div', { class: 'row small' }, el('span', { class: 'muted' }, 'Lot code'), el('b', { class: 'mono' }, nextLot()),
+        el('input', { type: 'text', id: 'mk-note', value: m.note, maxlength: 200, placeholder: 'Batch note (optional), e.g. for Café Senja', style: 'flex:1;min-width:180px', oninput: function (e) { m.note = e.target.value; saveSimDraft(); } })) : null,
       el('div', { class: 'row' },
         el('button', { class: 'btn', type: 'button', disabled: !allSaved || anyShort || !pw.totalG || !!busy.logBatch, onclick: function () { logBatch(beans, pw); } }, busy.logBatch ? 'Logging…' : 'Log this batch and deduct stock'),
         !allSaved ? el('span', { class: 'muted small' }, 'Quick beans have no stock. Save them under My beans to log batches.') : anyShort ? el('span', { class: 'small delta-neg' }, 'Not enough stock for this plan.') : null),
@@ -1429,14 +1584,18 @@
     if (live.some(function (b) { return !b; })) { toast('One of these beans was deleted. Pick another bean first.', true); return; }
     await withLock('logBatch', async function () {
     try {
+      var m = makeState(), lot = nextLot();
       await adjustStock(gramsByBean(beans, pw.perBean), -1);
       await putDoc('batches', uid('t'), {
+        lot: lot, note: String(m.note || '').trim().slice(0, 200), kind: m.mode,
+        useName: m.mode === 'useup' && beans[m.useIdx] ? beans[m.useIdx].name : '',
         blendName: sim.saveName || beans.map(function (b) { return b.name; }).join(' + '),
         items: beans.map(function (b, i) { return { beanId: b.id, name: b.name, grams: pw.perBean[i], pct: sim.pcts[i] }; }),
-        plan: BAGS.map(function (g) { return { bagG: g, count: sim.plan[g] || 0 }; }).filter(function (p) { return p.count; }),
+        plan: m.mode === 'bags' ? planRows().filter(function (p) { return p.count; }) : [],
         totalG: pw.totalG, brew: sim.brew, createdAt: Date.now(), undone: false
       });
-      toast('Batch logged. Stock deducted.');
+      m.note = ''; m.useG = ''; saveSimDraft();
+      toast('Batch ' + lot + ' logged. Stock deducted.');
     } catch (e) { /* toast already shown */ }
     });
   }
@@ -1532,9 +1691,38 @@
     var p = process || mainProcess(o);
     return { id: null, name: '', originId: o.id, roastery: '', species: o.species, roast: 3, process: p, varietal: 'unknown', producer: '', altitude: o.altitude || '', cupScore: '', bagNotes: '', scores: E.scoresFor(o, 3, p), stockG: 1000 };
   }
+  // ---------- list filters + CSV (shared by My beans, Blends, Cupping log, Batches) ----------
+  var filters = { beans: { q: '', inStock: false, species: '' }, blends: { q: '', brew: '' }, cupping: { q: '', clean: '' }, batches: { q: '', hideUndone: false } };
+  function matches(q, parts) { q = String(q || '').trim().toLowerCase(); return !q || parts.filter(Boolean).join(' ').toLowerCase().indexOf(q) >= 0; }
+  function searchBox(id, F, placeholder) {
+    return el('input', { type: 'search', id: id, value: F.q, placeholder: placeholder, style: 'flex:2;min-width:180px', 'aria-label': placeholder, oninput: function (e) { F.q = e.target.value; render(); } });
+  }
+  function csvCell(v) {
+    var s = v == null ? '' : String(v);
+    if (/^[=+\-@\t\r]/.test(s)) s = '\'' + s; // keep spreadsheet apps from running a cell as a formula
+    return /[",\n\r;]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+  }
+  function toCsv(rows) { return '﻿' + rows.map(function (r) { return r.map(csvCell).join(','); }).join('\r\n') + '\r\n'; }
+  function lowStockG() { var v = Number(state.settings.lowStockG); return isFinite(v) && v >= 0 ? v : 500; }
+  function isLowStock(b) { var s = Number(b.stockG) || 0; return s <= 0 || s < lowStockG(); }
+  var stockEdit = {};
+  function changeStock(b, fn, label) {
+    return withLock('stock:' + b.id, async function () {
+      var fresh = beanById(b.id); if (!fresh) return;
+      var next = Math.max(0, Math.round(fn(Number(fresh.stockG) || 0)));
+      try { await patchDoc('beans', fresh.id, { stockG: next }); toast(label + ' ' + fresh.name + ': now ' + fmtKg(next) + '.'); } catch (e) { /* shown */ }
+    });
+  }
   function viewBeans() {
-    var f = state.beanForm;
-    var parts = [el('div', { class: 'row' }, el('h2', null, 'My beans'), el('span', { class: 'spacer' }),
+    var f = state.beanForm, F = filters.beans;
+    var list = state.beans.filter(function (b) {
+      var o = originById(b.originId);
+      return (!F.inStock || (b.stockG || 0) > 0) && (!F.species || b.species === F.species) &&
+        matches(F.q, [b.name, b.roastery, b.bagNotes, b.producer, o && o.region, o && o.country]);
+    });
+    var low = state.beans.filter(isLowStock).length;
+    var parts = [el('div', { class: 'row' }, el('h2', null, 'My beans'), low ? el('span', { class: 'pill warn' }, low + ' low on stock') : null, el('span', { class: 'spacer' }),
+      state.beans.length ? el('button', { class: 'btn ghost', type: 'button', onclick: exportBeansCsv }, 'Export CSV') : null,
       !f ? el('button', { class: 'btn primary', type: 'button', onclick: function () { state.beanForm = blankBeanForm(); render(); } }, '+ Add a bean') : null)];
     if (f) parts.push(beanForm(f));
     if (!state.beans.length && !f) {
@@ -1542,15 +1730,46 @@
         el('p', null, state.mode === 'connecting' ? 'Loading your beans…' : 'No beans yet. Add each roasted bean you buy, with the notes printed on its bag and how many grams you have.'),
         el('button', { class: 'btn primary', type: 'button', onclick: function () { state.beanForm = blankBeanForm(); render(); } }, 'Add your first bean')));
     }
-    parts.push(el('div', { class: 'list' }, state.beans.map(beanCard)));
+    if (state.beans.length) parts.push(el('div', { class: 'row filterbar' }, searchBox('f-beans-q', F, 'Search name, roastery, origin or notes'),
+      el('select', { id: 'f-beans-sp', value: F.species, style: 'width:auto', 'aria-label': 'Species', onchange: function (e) { F.species = e.target.value; render(); } }, opt('', 'All species'), SPECIES.map(function (s) { return opt(s, s); })),
+      el('label', { class: 'row tight small' }, el('input', { type: 'checkbox', id: 'f-beans-stock', checked: F.inStock, onchange: function (e) { F.inStock = e.target.checked; render(); } }), 'In stock only'),
+      el('span', { class: 'muted small' }, list.length + ' of ' + state.beans.length)));
+    parts.push(el('div', { class: 'list' }, list.map(beanCard)));
+    if (state.beans.length && !list.length) parts.push(el('p', { class: 'muted small' }, 'No beans match. Clear the search or filters.'));
     return el('div', { class: 'stack' }, parts);
+  }
+  async function exportBeansCsv() {
+    var rows = [['Name', 'Roastery', 'Country', 'Region', 'Species', 'Process', 'Varietal', 'Roast (1-5)', 'Stock (g)', 'Cup score', 'Scores from', 'Body', 'Acidity', 'Sweetness', 'Bitterness', 'Bag notes']];
+    state.beans.forEach(function (b) {
+      var o = originById(b.originId);
+      rows.push([b.name, b.roastery || '', o ? o.country : '', o ? o.region : '', b.species, procLabel(beanProcess(b)), b.varietal && b.varietal !== 'unknown' ? (E.VARIETALS[b.varietal] || {}).label || b.varietal : '',
+        b.roast, b.stockG || 0, b.cupScore == null ? '' : b.cupScore, SOURCE_LABEL[scoreSource(b)]].concat(ATTRS.map(function (a) { return b.scores ? b.scores[a] : ''; })).concat([b.bagNotes || '']));
+    });
+    if (await saveFile('ratio-decider-beans-' + new Date().toISOString().slice(0, 10) + '.csv', toCsv(rows))) toast('Beans exported.');
   }
   function beanCard(b) {
     var o = originById(b.originId);
     var confirming = state.confirm === 'bean:' + b.id;
     var learned = (b.calibCount || 0) > 0 || Object.keys(b.noteCalib || {}).length > 0;
+    var isLow = isLowStock(b), sk = 'stock:' + b.id, editing = stockEdit[b.id];
     return el('article', { class: 'card' },
-      el('div', { class: 'row' }, el('h3', null, b.name), speciesBadge(b.species), procBadge(beanProcess(b)), el('span', { class: 'spacer' }), el('span', { class: 'mono' }, fmtKg(b.stockG || 0))),
+      el('div', { class: 'row' }, el('h3', null, b.name), speciesBadge(b.species), procBadge(beanProcess(b)), sourceBadge(scoreSource(b)),
+        isLow ? el('span', { class: 'pill warn', title: 'Below ' + fmtKg(lowStockG()) + ' (change under Settings)' }, (b.stockG || 0) > 0 ? 'Low stock' : 'Out of stock') : null,
+        el('span', { class: 'spacer' }), el('span', { class: 'mono' }, fmtKg(b.stockG || 0))),
+      el('div', { class: 'row tight small' }, el('span', { class: 'muted' }, 'Stock'),
+        el('button', { class: 'btn', type: 'button', disabled: !!busy[sk], onclick: function () { changeStock(b, function (s) { return s + 500; }, 'Added 500 g to'); } }, '+500 g'),
+        el('button', { class: 'btn', type: 'button', disabled: !!busy[sk], onclick: function () { changeStock(b, function (s) { return s + 1000; }, 'Added 1 kg to'); } }, '+1 kg'),
+        editing != null ? el('span', { class: 'row tight' },
+          el('input', { type: 'number', id: 'stk-' + b.id, min: 0, step: 50, value: editing, style: 'width:110px', 'aria-label': 'New stock in grams for ' + b.name,
+            oninput: function (e) { stockEdit[b.id] = e.target.value; },
+            onkeydown: function (e) { if (e.key === 'Enter') e.target.parentNode.querySelector('.btn.primary').click(); if (e.key === 'Escape') { delete stockEdit[b.id]; render(); } } }), 'g',
+          el('button', { class: 'btn primary', type: 'button', disabled: !!busy[sk], onclick: function () {
+            var v = Number(stockEdit[b.id]);
+            if (stockEdit[b.id] === '' || !isFinite(v) || v < 0) { toast('Enter the grams you have now (0 or more).', true); return; }
+            delete stockEdit[b.id]; changeStock(b, function () { return v; }, 'Set stock of');
+          } }, 'Set'),
+          el('button', { class: 'btn ghost', type: 'button', onclick: function () { delete stockEdit[b.id]; render(); } }, 'Cancel'))
+          : el('button', { class: 'btn ghost', type: 'button', onclick: function () { stockEdit[b.id] = String(b.stockG || 0); render(); var i = byId('stk-' + b.id); if (i) { i.focus(); i.select(); } } }, 'Adjust stock')),
       el('p', { class: 'muted small' }, [o ? o.country + ' · ' + o.region : 'Custom origin', b.producer || null, b.varietal && b.varietal !== 'unknown' ? (E.VARIETALS[b.varietal] || {}).label : null,
         b.altitude || null, b.roastery ? 'from ' + b.roastery : null, procLabel(beanProcess(b)), E.roastColour(b.roast).name + ' roast', b.cupScore ? 'cup score ' + nf(b.cupScore, 2) : null].filter(Boolean).join(' · ')),
       noteChips(b.bagNotes, { noteCalib: b.noteCalib }), scoreLine(b.scores, b.calib),
@@ -1558,6 +1777,7 @@
       el('div', { class: 'row' },
         el('button', { class: 'btn', type: 'button', onclick: function () { state.beanForm = Object.assign({ varietal: 'unknown', producer: '', altitude: '', cupScore: '' }, b, { process: beanProcess(b), scores: Object.assign({}, b.scores) }); if (state.beanForm.cupScore == null) state.beanForm.cupScore = ''; render(); window.scrollTo(0, 0); } }, 'Edit'),
         el('button', { class: 'btn', type: 'button', onclick: function () { addToSim(b.id); } }, 'Use in simulator'),
+        el('button', { class: 'btn', type: 'button', onclick: function () { startBeanCupping(b); } }, 'Cup this bean'),
         learned ? el('button', { class: 'btn ghost', type: 'button', onclick: async function () { try { await patchDoc('beans', b.id, { calib: {}, noteCalib: {}, calibCount: 0, calibResetAt: Date.now() }); toast('Cupping adjustments reset for ' + b.name + '.'); } catch (e) { /* shown */ } } }, 'Reset cupping adjustments') : null,
         el('span', { class: 'spacer' }),
         confirming ? el('span', { class: 'row tight' }, el('span', { class: 'small' }, 'Delete this bean?'),
@@ -1616,16 +1836,19 @@
       typical && f.bagNotes !== typical ? el('button', { class: 'btn ghost', type: 'button', onclick: function () { f.bagNotes = typical; render(); } }, 'Use the typical notes (' + f.species + ', ' + procLabel(f.process).toLowerCase() + ')') : null,
       noteChips(f.bagNotes, { showIgnored: true }),
       el('div', { class: 'grid4' }, ATTRS.map(function (a) {
-        return field(AL[a] + ' (1–5)', el('input', { type: 'number', id: 'bf-sc-' + a, min: 1, max: 5, step: 0.5, value: f.scores[a], oninput: function (e) { var v = Number(e.target.value); if (v >= 1 && v <= 5) f.scores[a] = v; }, onchange: function () { render(); } }));
+        return field(AL[a] + ' (1–5)', el('input', { type: 'number', id: 'bf-sc-' + a, min: 1, max: 5, step: 0.5, value: f.scores[a], oninput: function (e) { var v = Number(e.target.value); if (v >= 1 && v <= 5) { f.scores[a] = v; f.scoreSource = 'manual'; } }, onchange: function () { render(); } }));
       })),
       el('div', { class: 'row' }, el('p', { class: 'muted small', style: 'flex:1' }, 'Scores start from the origin\'s typical values for this process and roast level. Change them to match what you taste; your changes are kept when you switch roast or process.'),
-        current && !sameScores(f.scores, current) ? el('button', { class: 'btn ghost', type: 'button', onclick: function () { f.scores = current; render(); } }, 'Reset to origin scores') : null),
+        current && !sameScores(f.scores, current) ? el('button', { class: 'btn ghost', type: 'button', onclick: function () { f.scores = current; f.scoreSource = 'origin'; render(); } }, 'Reset to origin scores') : null),
       el('div', { class: 'row' },
         el('button', { class: 'btn primary', type: 'button', onclick: async function () {
           if (!f.name.trim()) { toast('Give the bean a name.', true); return; }
           var data = { name: f.name.trim(), roastery: f.roastery || '', originId: f.originId || '', species: f.species, roast: f.roast, process: f.process, bagNotes: f.bagNotes || '', scores: f.scores, stockG: f.stockG || 0,
             varietal: f.varietal || 'unknown', producer: f.producer || '', altitude: f.altitude || '', cupScore: f.cupScore === '' || f.cupScore == null ? null : Number(f.cupScore),
             calib: f.calib || {}, noteCalib: f.noteCalib || {}, calibCount: f.calibCount || 0, createdAt: f.createdAt || Date.now() };
+          var d0 = derived(f.originId, f.roast, f.process, f.varietal, f.species);
+          data.scoreSource = d0 && sameScores(f.scores, d0) ? 'origin' : 'manual';
+          if (f.calibResetAt) data.calibResetAt = f.calibResetAt;
           try { await putDoc('beans', f.id || uid('b'), data); state.beanForm = null; toast('Saved ' + data.name + '.'); render(); } catch (e) { /* shown */ }
         } }, 'Save bean'),
         el('button', { class: 'btn ghost', type: 'button', onclick: function () { state.beanForm = null; render(); } }, 'Cancel')));
@@ -1636,8 +1859,17 @@
     var parts = [el('div', { class: 'row' }, el('h2', null, 'Cupping log'), el('span', { class: 'spacer' }),
       !state.cupDraft ? el('button', { class: 'btn', type: 'button', onclick: function () { if (!sim.pcts) { toast('Run the simulator first, then log a cupping for its mix.', true); go('simulator'); return; } startCupDraft('', sim.pcts); } }, '+ Log cupping for the current mix') : null)];
     if (state.cupDraft) parts.push(cupForm(state.cupDraft));
-    if (!state.cuppings.length && !state.cupDraft) parts.push(el('div', { class: 'empty' }, el('p', null, 'No cupping entries yet. Plan a cupping table in the simulator, cup the coded samples blind, then log what you tasted here. Each entry can correct the simulator for your beans: their scores and which bag notes really come through.')));
-    parts.push(el('div', { class: 'list' }, state.cuppings.map(cupCard)));
+    if (!state.cuppings.length && !state.cupDraft) parts.push(el('div', { class: 'empty' }, el('p', null, 'No cupping entries yet. Plan a cupping table in the simulator, cup the coded samples blind, then log what you tasted here. To check a new lot on its own, use Cup this bean under My beans. Each entry can correct the simulator for your beans: their scores and which bag notes really come through.')));
+    var F = filters.cupping;
+    var list = state.cuppings.filter(function (c) {
+      return (!F.clean || (F.clean === 'clean' ? c.clean : !c.clean)) &&
+        matches(F.q, [c.code, c.blendName, c.tastedNotes, c.defects].concat((c.items || []).map(function (it) { return it.name; })));
+    });
+    if (state.cuppings.length) parts.push(el('div', { class: 'row filterbar' }, searchBox('f-cup-q', F, 'Search code, blend, bean or notes'),
+      el('select', { id: 'f-cup-clean', value: F.clean, style: 'width:auto', 'aria-label': 'Clean or defects', onchange: function (e) { F.clean = e.target.value; render(); } }, opt('', 'All cups'), opt('clean', 'Clean only'), opt('defects', 'With defects')),
+      el('span', { class: 'muted small' }, list.length + ' of ' + state.cuppings.length)));
+    parts.push(el('div', { class: 'list' }, list.map(cupCard)));
+    if (state.cuppings.length && !list.length) parts.push(el('p', { class: 'muted small' }, 'No cupping entries match.'));
     return el('div', { class: 'stack' }, parts);
   }
   function scoreSelect(id, value, onchange) {
@@ -1741,7 +1973,22 @@
       c.cva ? el('p', { class: 'small mono' }, 'CVA intensities: ' + Object.keys(c.cva).filter(function (k) { return k !== 'liking' && k !== 'bitterness'; }).map(function (k) { return k + ' ' + nf(c.cva[k], 1); }).join(' · ') +
         (c.cva.liking != null ? ' · liking ' + c.cva.liking + '/9' : '')) : null,
       missed.length ? el('p', { class: 'small' }, 'Predicted but not tasted: ' + missed.join(', ') + '.') : null,
-      surprise.length ? el('p', { class: 'small' }, 'Tasted but not predicted: ' + surprise.join(', ') + '. If a bean really has this note, add it to that bean\'s bag notes.') : null,
+      surprise.length ? (function () {
+        // Single-bean (intake) cupping: what you tasted belongs to that bean, so it can go straight onto its notes.
+        var single = c.items.length === 1 && c.items[0].beanId ? beanById(c.items[0].beanId) : null;
+        var have = single ? noteKeys(single.bagNotes) : [];
+        var toAdd = single ? tasted.filter(function (n) { return surprise.indexOf(n.label) >= 0 && have.indexOf(n.key) < 0; }) : [];
+        return el('div', { class: 'row small' }, el('span', null, 'Tasted but not predicted: ' + surprise.join(', ') + '.' + (single ? '' : ' If a bean really has this note, add it to that bean\'s bag notes.')),
+          toAdd.length ? el('button', { class: 'btn', type: 'button', disabled: !!busy['notes:' + c.id], onclick: function () {
+            withLock('notes:' + c.id, async function () {
+              var b = beanById(single.id); if (!b) return;
+              var cur = String(b.bagNotes || '').trim(), keys = noteKeys(cur);
+              var add = toAdd.filter(function (n) { return keys.indexOf(n.key) < 0; }).map(function (n) { return n.label.toLowerCase(); });
+              if (!add.length) return;
+              try { await patchDoc('beans', b.id, { bagNotes: (cur ? cur + ', ' : '') + add.join(', ') }); toast('Added ' + add.join(', ') + ' to ' + b.name + '.'); } catch (e) { /* shown */ }
+            });
+          } }, 'Add tasted notes to ' + single.name) : single && surprise.length ? el('span', { class: 'muted' }, 'Already on the bean.') : null);
+      })() : null,
       !c.clean && c.defects ? el('p', { class: 'small delta-neg' }, 'Defects: ' + c.defects) : null,
       unrecognised ? el('div', { class: 'stack', style: 'gap:4px' }, el('p', { class: 'small' }, 'None of the tasted notes were recognised, so note learning is skipped. Tap a word to tell the tool what it is.'), noteChips(c.tastedNotes)) : null,
       ids.length ? el('div', { class: 'small' }, el('span', { class: 'label' }, c.applied ? 'Learning applied' : 'Learning to apply'),
@@ -1815,7 +2062,15 @@
   function viewBlends() {
     var parts = [el('h2', null, 'Saved blends')];
     if (!state.blends.length) parts.push(el('div', { class: 'empty' }, el('p', null, 'No saved blends yet. Decide a ratio in the simulator, then save it with a name.')));
-    parts.push(el('div', { class: 'list' }, state.blends.map(function (bl) {
+    var F = filters.blends;
+    var shown = state.blends.filter(function (bl) {
+      return (!F.brew || bl.brew === F.brew) && matches(F.q, [bl.name, bl.mustText, bl.summary].concat((bl.rows || []).map(function (r) { var b = r.kind === 'saved' ? beanById(r.beanId) : null; return b ? b.name : r.name; })));
+    });
+    if (state.blends.length) parts.push(el('div', { class: 'row filterbar' }, searchBox('f-bl-q', F, 'Search blend or bean name'),
+      el('select', { id: 'f-bl-brew', value: F.brew, style: 'width:auto', 'aria-label': 'Brew style', onchange: function (e) { F.brew = e.target.value; render(); } }, opt('', 'All brew styles'), Object.keys(E.BREWS).map(function (k) { return opt(k, E.BREWS[k].label); })),
+      el('span', { class: 'muted small' }, shown.length + ' of ' + state.blends.length)));
+    if (state.blends.length && !shown.length) parts.push(el('p', { class: 'muted small' }, 'No blends match.'));
+    parts.push(el('div', { class: 'list' }, shown.map(function (bl) {
       var r = evalBlend(bl);
       var confirming = state.confirm === 'blend:' + bl.id;
       return el('article', { class: 'card' },
@@ -1929,96 +2184,233 @@
       roast: E.roastColour(ev.values.roast), summary: ev.notes.summary,
       notes: ev.notes.notes.filter(function (n) { return n.tier === 'dominant' || n.tier === 'supporting'; }).map(function (n) { return n.label; }),
       values: ev.values, predicted: ev.predicted, acid: ev.acid.dominant ? E.ACID_TYPES[ev.acid.dominant].label : '',
-      recipe: E.recipeFor(sim.brew, ev.values.roast), roastDate: '', lang: '', translation: null
+      robustaPct: E.speciesShare(beans, sim.pcts).robusta,
+      recipe: E.recipeFor(sim.brew, ev.values.roast, E.speciesShare(beans, sim.pcts).robusta), roastDate: '', lang: '', translation: null,
+      tastingText: ev.notes.notes.filter(function (n) { return n.tier === 'dominant' || n.tier === 'supporting'; }).map(function (n) { return n.label.toLowerCase(); }).join(', '),
+      recipeNotes: ''
     };
     lsSet('rd.sheet.v1', state.sheet);
     go('sheet');
   }
-  function sheetRows(s) {
-    var r = s.recipe;
+  // Built-in wording for the spec sheet in English, Bahasa Indonesia and Thai, so it works offline and needs no AI.
+  // Numbers, units and blend/bean names are never translated.
+  var SHEET_I18N = {
+    en: { name: 'English', locale: 'en-GB', components: 'Components', profile: 'Profile as served', recipe: 'Recipe', water: 'Water and resting', tasting: 'Tasting notes',
+      recipeNotes: 'Recipe notes', seller: 'Supplied by', targets: 'Targets', cupScore: 'estimated cup score', roast: 'roast',
+      rows: { dose: 'Dose', yield: 'Output', ratio: 'Ratio', temp: 'Water temp', time: 'Time', grind: 'Grind' },
+      attrs: { body: 'Body', acidity: 'Acidity', sweetness: 'Sweetness', bitterness: 'Bitterness', roast: 'Roast level' },
+      brew: { filter: 'Bloom with 40 g water for 40 s, then pour in 2–3 slow pulses.', espresso: 'Taste for sweetness first; grind finer if sour, coarser if bitter or dry.',
+        flatwhite: 'Add 120–140 ml milk steamed to 55–60 °C with thin, glossy microfoam.', kopisusu: 'Add 120 ml fresh milk and 20–25 ml gula aren syrup; serve over ice if you like.',
+        icedmilk: 'Pull slightly stronger. Add 150 ml cold milk over 120 g ice, then the espresso on top.', coldbrew: 'Filter, then dilute 1:1 with water or milk. Keeps 5–7 days chilled.',
+        tonic: 'Fill a glass with ice and 120 ml chilled tonic (or 100 ml fresh orange juice). Pour the espresso slowly on top so it doesn\'t foam over.',
+        tubruk: 'Stir, wait 4 minutes and let the grounds settle before drinking. Add gula aren to taste.' },
+      robusta: 'This blend is {p}% robusta, so the shot runs 1 °C cooler and a little shorter: robusta extracts fast and turns harsh when pushed.',
+      grind: { 'Medium-fine, like table salt': 'Medium-fine, like table salt', 'Fine; adjust so the shot runs in the time window': 'Fine; adjust so the shot runs in the time window', 'Coarse, like raw sugar': 'Coarse, like raw sugar', 'Fine-medium': 'Fine-medium' },
+      waterGuide: null, restDays: '{a}–{b} days after the roast date', best: 'Best served {rest}.', roasted: 'Roasted {d}. Best served {from} to {to} ({rest}).',
+      disclaimer: 'The estimated cup score is calculated from component cup scores and is not an official SCA grade.' },
+    id: { name: 'Bahasa Indonesia', locale: 'id-ID', components: 'Komponen', profile: 'Profil saat disajikan', recipe: 'Resep', water: 'Air dan masa istirahat', tasting: 'Catatan rasa',
+      recipeNotes: 'Catatan resep', seller: 'Dipasok oleh', targets: 'Target', cupScore: 'perkiraan skor cupping', roast: 'sangrai',
+      rows: { dose: 'Dosis', yield: 'Hasil', ratio: 'Rasio', temp: 'Suhu air', time: 'Waktu', grind: 'Gilingan' },
+      attrs: { body: 'Body', acidity: 'Keasaman', sweetness: 'Rasa manis', bitterness: 'Rasa pahit', roast: 'Tingkat sangrai' },
+      brew: { filter: 'Lakukan blooming dengan 40 g air selama 40 detik, lalu tuang perlahan dalam 2–3 tahap.', espresso: 'Cicipi rasa manisnya dulu; giling lebih halus jika asam, lebih kasar jika pahit atau kering.',
+        flatwhite: 'Tambahkan 120–140 ml susu yang di-steam hingga 55–60 °C dengan microfoam tipis dan mengilap.', kopisusu: 'Tambahkan 120 ml susu segar dan 20–25 ml sirup gula aren; sajikan dengan es bila suka.',
+        icedmilk: 'Seduh sedikit lebih pekat. Tuang 150 ml susu dingin ke atas 120 g es, lalu espresso di atasnya.', coldbrew: 'Saring, lalu encerkan 1:1 dengan air atau susu. Tahan 5–7 hari di lemari es.',
+        tonic: 'Isi gelas dengan es dan 120 ml tonik dingin (atau 100 ml jus jeruk segar). Tuang espresso perlahan di atasnya agar tidak meluap.',
+        tubruk: 'Aduk, tunggu 4 menit dan biarkan ampas mengendap sebelum diminum. Tambahkan gula aren sesuai selera.' },
+      robusta: 'Blend ini mengandung {p}% robusta, jadi shot dibuat 1 °C lebih rendah dan sedikit lebih pendek: robusta cepat terekstraksi dan menjadi kasar bila dipaksa.',
+      grind: { 'Medium-fine, like table salt': 'Sedang-halus, seperti garam dapur', 'Fine; adjust so the shot runs in the time window': 'Halus; sesuaikan agar shot selesai dalam rentang waktu', 'Coarse, like raw sugar': 'Kasar, seperti gula pasir kasar', 'Fine-medium': 'Halus-sedang' },
+      waterGuide: 'Panduan air SCA (perkiraan): total padatan terlarut sekitar 150 mg/L (75–250), kesadahan kalsium sekitar 68 mg/L, alkalinitas sekitar 40 mg/L, pH sekitar 7. Air keran di Singapura, Bangkok dan kota-kota di Indonesia berbeda-beda, jadi saring dan bila perlu tambahkan mineral hingga mencapai target ini.',
+      restDays: '{a}–{b} hari setelah tanggal sangrai', best: 'Paling nikmat disajikan {rest}.', roasted: 'Disangrai {d}. Paling nikmat disajikan {from} sampai {to} ({rest}).',
+      disclaimer: 'Perkiraan skor cupping dihitung dari skor tiap komponen dan bukan nilai resmi SCA.' },
+    th: { name: 'ภาษาไทย', locale: 'th-TH', components: 'ส่วนผสม', profile: 'โปรไฟล์เมื่อเสิร์ฟ', recipe: 'สูตร', water: 'น้ำและการพักเมล็ด', tasting: 'โน้ตรสชาติ',
+      recipeNotes: 'หมายเหตุสูตร', seller: 'จัดจำหน่ายโดย', targets: 'เป้าหมาย', cupScore: 'คะแนนคัปปิ้งโดยประมาณ', roast: 'คั่ว',
+      rows: { dose: 'ปริมาณกาแฟ', yield: 'ปริมาณที่ได้', ratio: 'อัตราส่วน', temp: 'อุณหภูมิน้ำ', time: 'เวลา', grind: 'ความละเอียดการบด' },
+      attrs: { body: 'บอดี้', acidity: 'ความเปรี้ยว', sweetness: 'ความหวาน', bitterness: 'ความขม', roast: 'ระดับการคั่ว' },
+      brew: { filter: 'บลูมด้วยน้ำ 40 กรัม นาน 40 วินาที แล้วค่อย ๆ เทอีก 2–3 รอบ', espresso: 'ชิมความหวานก่อน ถ้าเปรี้ยวให้บดละเอียดขึ้น ถ้าขมหรือฝาดให้บดหยาบลง',
+        flatwhite: 'เติมนมสตีม 120–140 มล. ที่ 55–60 °C ให้ฟองนมบางและเนียนเงา', kopisusu: 'เติมนมสด 120 มล. และไซรัปน้ำตาลปาล์ม (gula aren) 20–25 มล. เสิร์ฟพร้อมน้ำแข็งได้ตามชอบ',
+        icedmilk: 'สกัดให้เข้มขึ้นเล็กน้อย เทนมเย็น 150 มล. ลงบนน้ำแข็ง 120 กรัม แล้วเทเอสเปรสโซด้านบน', coldbrew: 'กรอง แล้วเจือจาง 1:1 ด้วยน้ำหรือนม เก็บในตู้เย็นได้ 5–7 วัน',
+        tonic: 'ใส่น้ำแข็งและโทนิกเย็น 120 มล. (หรือน้ำส้มคั้นสด 100 มล.) ลงในแก้ว แล้วค่อย ๆ เทเอสเปรสโซด้านบนเพื่อไม่ให้ฟองล้น',
+        tubruk: 'คนให้เข้ากัน รอ 4 นาทีให้กากตกตะกอนก่อนดื่ม เติมน้ำตาลปาล์มตามชอบ' },
+      robusta: 'เบลนด์นี้มีโรบัสต้า {p}% จึงสกัดที่อุณหภูมิต่ำลง 1 °C และสั้นลงเล็กน้อย เพราะโรบัสต้าสกัดเร็วและจะหยาบกระด้างถ้าสกัดนานเกินไป',
+      grind: { 'Medium-fine, like table salt': 'กลางค่อนละเอียด เหมือนเกลือป่น', 'Fine; adjust so the shot runs in the time window': 'ละเอียด ปรับให้ช็อตไหลอยู่ในช่วงเวลาที่กำหนด', 'Coarse, like raw sugar': 'หยาบ เหมือนน้ำตาลทรายดิบ', 'Fine-medium': 'ละเอียดถึงปานกลาง' },
+      waterGuide: 'แนวทางน้ำของ SCA (โดยประมาณ): ของแข็งที่ละลายทั้งหมดราว 150 มก./ลิตร (75–250) ความกระด้างแคลเซียมราว 68 มก./ลิตร ความเป็นด่างราว 40 มก./ลิตร pH ราว 7 น้ำประปาในสิงคโปร์ กรุงเทพฯ และเมืองต่าง ๆ ในอินโดนีเซียไม่เท่ากัน จึงควรกรองและเติมแร่ธาตุให้ได้ตามค่านี้หากจำเป็น',
+      restDays: '{a}–{b} วันหลังวันคั่ว', best: 'ดื่มได้ดีที่สุด {rest}', roasted: 'คั่วเมื่อ {d} ดื่มได้ดีที่สุดช่วง {from} ถึง {to} ({rest})',
+      disclaimer: 'คะแนนคัปปิ้งโดยประมาณคำนวณจากคะแนนของแต่ละส่วนผสม ไม่ใช่คะแนนอย่างเป็นทางการของ SCA' }
+  };
+  function fill(tpl, v) { return String(tpl).replace(/\{(\w+)\}/g, function (_, k) { return v[k] == null ? '' : v[k]; }); }
+  function sheetRecipe(s) { return E.recipeFor(s.brew, s.values ? s.values.roast : 3, s.robustaPct || 0); }
+  // Every text on the sheet in one language; the view, the HTML file and the WhatsApp text all read from this.
+  function sheetText(s, lang) {
+    var L = SHEET_I18N[lang] || SHEET_I18N.en, r = sheetRecipe(s);
+    var restM = /(\d+)\s*[–-]\s*(\d+)/.exec(r.rest || '') || [0, '', ''];
+    var rest = fill(L.restDays, { a: restM[1], b: restM[2] });
+    var brewText = (L.brew[E.BREWS[s.brew] ? s.brew : 'filter'] || '') + (r.robustaAdjusted ? ' ' + fill(L.robusta, { p: Math.round(s.robustaPct) }) : '');
+    var restLineText;
+    var ymd = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(s.roastDate || ''));
+    // "YYYY-MM-DD" from a date input is a local calendar day; new Date(string) would read it as UTC midnight.
+    var d = ymd ? new Date(Number(ymd[1]), Number(ymd[2]) - 1, Number(ymd[3])) : null;
+    if (d && !isNaN(d) && restM[1]) {
+      var from = new Date(d), to = new Date(d);
+      from.setDate(from.getDate() + Number(restM[1])); to.setDate(to.getDate() + Number(restM[2]));
+      var fmt = function (x) { try { return x.toLocaleDateString(L.locale, { day: 'numeric', month: 'short', year: 'numeric' }); } catch (e) { return x.toDateString(); } };
+      restLineText = fill(L.roasted, { d: fmt(d), from: fmt(from), to: fmt(to), rest: rest });
+    } else restLineText = fill(L.best, { rest: rest });
     return {
-      components: s.beans.map(function (b) { return [b.share + '%', b.name, [b.species ? b.species.charAt(0).toUpperCase() + b.species.slice(1) : '', b.origin, b.process, b.varietal, b.producer, b.altitude].filter(Boolean).join(' · ')]; }),
-      profile: TATTRS.map(function (a) { return [AL[a], nf(s.values[a], 1) + ' / 5']; }),
-      recipe: [['Dose', r.dose], ['Output', r.yield], ['Ratio', r.ratio], ['Water temp', r.temp], ['Time', r.time], ['Grind', r.grind]]
+      L: L, recipe: r, brewText: brewText, grind: L.grind[r.grind] || r.grind, water: L.waterGuide || r.water, rest: restLineText,
+      recipeRows: [[L.rows.dose, r.dose], [L.rows.yield, r.yield], [L.rows.ratio, r.ratio], [L.rows.temp, r.temp], [L.rows.time, r.time], [L.rows.grind, L.grind[r.grind] || r.grind]],
+      profileRows: TATTRS.map(function (a) { return [L.attrs[a], nf(s.values[a], 1) + ' / 5']; })
     };
   }
-  function restLine(s) {
-    if (!s.roastDate) return 'Best served ' + s.recipe.rest + '.';
-    // "YYYY-MM-DD" from a date input is a local calendar day; new Date(string) would read it as UTC midnight.
-    var ymd = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(s.roastDate));
-    var d = ymd ? new Date(Number(ymd[1]), Number(ymd[2]) - 1, Number(ymd[3])) : new Date(NaN);
-    var m = /(\d+)\s*[–-]\s*(\d+)/.exec(s.recipe.rest || '');
-    if (isNaN(d) || !m) return 'Best served ' + s.recipe.rest + '.';
-    var from = new Date(d), to = new Date(d);
-    from.setDate(from.getDate() + Number(m[1])); to.setDate(to.getDate() + Number(m[2]));
-    return 'Roasted ' + dateStr(d) + '. Best served ' + dateStr(from) + ' to ' + dateStr(to) + ' (' + s.recipe.rest + ').';
+  function sheetRows(s) {
+    return { components: s.beans.map(function (b) { return [b.share + '%', b.name, [b.species ? b.species.charAt(0).toUpperCase() + b.species.slice(1) : '', b.origin, b.process, b.varietal, b.producer, b.altitude].filter(Boolean).join(' · ')]; }) };
+  }
+  function sheetSeller() { var sv = state.settings.seller || {}; return { name: String(sv.name || ''), contact: String(sv.contact || '') }; }
+  function sheetTasting(s) { return s.tastingText != null ? s.tastingText : (s.notes || []).join(', '); }
+  // Restored from an older draft: fill in the fields added since.
+  function normSheet(s) {
+    if (s.robustaPct == null) s.robustaPct = E.speciesShare(s.beans || [], (s.beans || []).map(function (b) { return b.share; })).robusta;
+    if (s.tastingText == null) s.tastingText = (s.notes || []).map(function (n) { return String(n).toLowerCase(); }).join(', ');
+    if (s.recipeNotes == null) s.recipeNotes = '';
+    if (!SHEET_I18N[s.lang]) s.lang = '';
+    return s;
+  }
+  function headLine(s, L) {
+    return [s.species || E.speciesShare(s.beans, s.beans.map(function (b) { return b.share; })).label, E.BREWS[s.brew].label, s.roast.name + ' ' + L.roast + ' (Agtron ' + s.roast.agtron + ')',
+      s.predicted ? L.cupScore + ' ' + nf(s.predicted.value, 1) : null].filter(Boolean).join(' · ');
   }
   function sheetHtml(s) {
-    var rows = sheetRows(s), t = s.translation;
-    function table(list) { return '<table>' + list.map(function (r) { return '<tr>' + r.map(function (c, i) { return (i ? '<td>' : '<th>') + esc(c) + (i ? '</td>' : '</th>'); }).join('') + '</tr>'; }).join('') + '</table>'; }
-    return '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>' + esc(s.name) + ' · spec sheet</title>' +
-      '<style>body{font:15px/1.5 system-ui,sans-serif;max-width:760px;margin:24px auto;padding:0 16px;color:#1d1a17}h1{font-family:Georgia,serif;margin:0}h2{font-size:14px;text-transform:uppercase;letter-spacing:.08em;color:#7a3e1d;margin:22px 0 6px}table{border-collapse:collapse;width:100%}th,td{text-align:left;padding:5px 8px;border-bottom:1px solid #ddd;vertical-align:top}.muted{color:#666;font-size:13px}.tag{display:inline-block;background:#f2e5db;color:#7a3e1d;border-radius:99px;padding:2px 10px;margin:2px;font-size:13px}</style></head><body>' +
-      '<h1>' + esc(s.name) + '</h1><p class="muted">' + esc(s.species || E.speciesShare(s.beans, s.beans.map(function (b) { return b.share; })).label) + ' · ' + esc(E.BREWS[s.brew].label) + ' · ' + esc(s.roast.name) + ' roast (Agtron ' + esc(s.roast.agtron) + ')' +
-      (s.predicted ? ' · estimated cup score ' + esc(nf(s.predicted.value, 1)) : '') + '</p>' +
-      '<p>' + s.notes.map(function (n) { return '<span class="tag">' + esc(n) + '</span>'; }).join('') + '</p><p>' + esc(s.summary) + (s.acid ? ' Acidity: ' + esc(s.acid) + '.' : '') + '</p>' +
-      (t && t.summary ? '<p><em>' + esc(t.summary) + '</em></p>' : '') +
-      '<h2>Components</h2>' + table(rows.components) + '<h2>Profile (as served)</h2>' + table(rows.profile) +
-      '<h2>Recipe: ' + esc(s.recipe.title) + '</h2>' + table(rows.recipe) + '<p>' + esc(s.recipe.extra) + '</p>' + (t && t.extra ? '<p><em>' + esc(t.extra) + '</em></p>' : '') +
-      '<p class="muted">Targets: ' + esc(s.recipe.targets) + '</p>' +
-      '<h2>Water and resting</h2><p>' + esc(s.recipe.water) + '</p>' + (t && t.water ? '<p><em>' + esc(t.water) + '</em></p>' : '') + '<p>' + esc(restLine(s)) + '</p>' +
-      '<p class="muted">The estimated cup score is calculated from component cup scores and is not an official SCA grade.</p></body></html>';
+    var en = sheetText(s, 'en'), two = s.lang ? sheetText(s, s.lang) : null, rows = sheetRows(s), seller = sheetSeller(), t = s.translation;
+    function h(key) { return '<h2>' + esc(en.L[key]) + (two ? ' · ' + esc(two.L[key]) : '') + '</h2>'; }
+    function alt(text) { return text ? '<p class="alt">' + esc(text) + '</p>' : ''; }
+    function table(list, list2) { return '<table>' + list.map(function (r, i) { return '<tr><th>' + esc(r[0]) + (list2 ? '<br><span class="alt">' + esc(list2[i][0]) + '</span>' : '') + '</th>' + r.slice(1).map(function (c) { return '<td>' + esc(c) + '</td>'; }).join('') + '</tr>'; }).join('') + '</table>'; }
+    var tasting = sheetTasting(s).split(',').map(function (x) { return x.trim(); }).filter(Boolean);
+    return '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>' + esc(s.name) + ' · spec sheet</title>' +
+      '<style>body{font:15px/1.5 system-ui,sans-serif;max-width:760px;margin:24px auto;padding:0 16px;color:#1d1a17}h1{font-family:Georgia,serif;margin:0}h2{font-size:14px;text-transform:uppercase;letter-spacing:.08em;color:#7a3e1d;margin:20px 0 6px}table{border-collapse:collapse;width:100%}th,td{text-align:left;padding:5px 8px;border-bottom:1px solid #ddd;vertical-align:top}.muted{color:#666;font-size:13px}.alt{color:#555;font-style:italic;font-size:13px;margin:2px 0 8px}.tag{display:inline-block;background:#f2e5db;color:#7a3e1d;border-radius:99px;padding:2px 10px;margin:2px;font-size:13px}.seller{border-top:2px solid #7a3e1d;margin-top:22px;padding-top:8px}@media print{body{margin:0;max-width:none}h2{break-after:avoid}table,tr{break-inside:avoid}}</style></head><body>' +
+      '<h1>' + esc(s.name) + '</h1><p class="muted">' + esc(headLine(s, en.L)) + '</p>' +
+      h('tasting') + '<p>' + tasting.map(function (n) { return '<span class="tag">' + esc(n) + '</span>'; }).join('') + '</p><p>' + esc(s.summary) + (s.acid ? ' Acidity: ' + esc(s.acid) + '.' : '') + '</p>' + (t && t.summary ? alt(t.summary) : '') +
+      h('components') + table(rows.components) + h('profile') + table(en.profileRows, two && two.profileRows) +
+      h('recipe') + '<p><b>' + esc(en.recipe.title) + '</b></p>' + table(en.recipeRows, two && two.recipeRows) + '<p>' + esc(en.brewText) + '</p>' + (two ? alt(two.brewText) : '') +
+      '<p class="muted">' + esc(en.L.targets) + ': ' + esc(en.recipe.targets) + '</p>' +
+      (s.recipeNotes ? h('recipeNotes') + '<p>' + esc(s.recipeNotes) + '</p>' : '') +
+      h('water') + '<p>' + esc(en.water) + '</p>' + (two ? alt(two.water) : '') + '<p>' + esc(en.rest) + '</p>' + (two ? alt(two.rest) : '') +
+      (seller.name || seller.contact ? '<p class="seller">' + esc(en.L.seller) + (two ? ' / ' + esc(two.L.seller) : '') + ': <b>' + esc(seller.name) + '</b>' + (seller.contact ? ' · ' + esc(seller.contact) : '') + '</p>' : '') +
+      '<p class="muted">' + esc(en.L.disclaimer) + (two ? '<br>' + esc(two.L.disclaimer) : '') + '</p></body></html>';
+  }
+  // Plain text for WhatsApp: *bold* headings, one fact per line, no HTML.
+  function sheetWhatsApp(s) {
+    var en = sheetText(s, 'en'), two = s.lang ? sheetText(s, s.lang) : null, seller = sheetSeller(), out = [];
+    out.push('*' + s.name + '*', headLine(s, en.L), '');
+    out.push('*' + en.L.tasting + (two ? ' / ' + two.L.tasting : '') + ':* ' + sheetTasting(s));
+    if (s.summary) out.push(s.summary);
+    out.push('', '*' + en.L.components + (two ? ' / ' + two.L.components : '') + '*');
+    sheetRows(s).components.forEach(function (c) { out.push('• ' + c[0] + ' ' + c[1] + (c[2] ? ' (' + c[2] + ')' : '')); });
+    out.push('', '*' + en.L.recipe + (two ? ' / ' + two.L.recipe : '') + ': ' + en.recipe.title + '*');
+    en.recipeRows.forEach(function (r) { out.push(r[0] + ': ' + r[1]); });
+    out.push(en.brewText); if (two) out.push('_' + two.brewText + '_');
+    if (s.recipeNotes) out.push('', '*' + en.L.recipeNotes + ':* ' + s.recipeNotes);
+    out.push('', en.rest); if (two) out.push('_' + two.rest + '_');
+    if (seller.name || seller.contact) out.push('', '— ' + [seller.name, seller.contact].filter(Boolean).join(' · '));
+    return out.join('\n');
+  }
+  async function copyText(text) {
+    try { if (navigator.clipboard && navigator.clipboard.writeText) { await navigator.clipboard.writeText(text); return true; } } catch (e) { /* blocked: try the old way */ }
+    try {
+      var ta = document.createElement('textarea'); ta.value = text; ta.setAttribute('readonly', ''); ta.style.position = 'fixed'; ta.style.opacity = '0';
+      document.body.appendChild(ta); ta.select(); var ok = document.execCommand('copy'); document.body.removeChild(ta); return !!ok;
+    } catch (e) { return false; }
   }
   function viewSheet() {
     var s = state.sheet || (state.sheet = lsGet('rd.sheet.v1'));
     if (!s) return el('div', { class: 'stack' }, el('h2', null, 'Café spec sheet'),
       el('div', { class: 'empty' }, el('p', null, 'Decide a ratio in the simulator, then press "Make a café spec sheet" on the recipe card. The sheet lists components, roast colour, notes, recipe, water and rest advice for café buyers.'),
         el('button', { class: 'btn primary', type: 'button', onclick: function () { go('simulator'); } }, 'Go to the simulator')));
-    var rows = sheetRows(s), t = s.translation;
+    normSheet(s);
+    var en = sheetText(s, 'en'), two = s.lang ? sheetText(s, s.lang) : null, rows = sheetRows(s), t = s.translation, seller = sheetSeller();
+    var sf = state.sellerDraft = state.sellerDraft || seller;
     function save() { lsSet('rd.sheet.v1', s); }
-    function tbl(list) { return el('div', { class: 'tablewrap' }, el('table', null, el('tbody', null, list.map(function (r) { return el('tr', null, r.map(function (c, i) { return el(i ? 'td' : 'th', null, c); })); })))); }
+    function saveSeller() {
+      if (sf.name === seller.name && sf.contact === seller.contact) return;
+      saveSettings({ seller: { name: sf.name.trim().slice(0, 120), contact: sf.contact.trim().slice(0, 200) } }).then(function () { state.sellerDraft = null; render(); }, function () { /* shown */ });
+    }
+    function tbl(list, list2) { return el('div', { class: 'tablewrap' }, el('table', null, el('tbody', null, list.map(function (r, i) { return el('tr', null, el('th', null, r[0], list2 ? el('div', { class: 'alt' }, list2[i][0]) : null), r.slice(1).map(function (c) { return el('td', null, c); })); })))); }
+    function head(key) { return el('span', { class: 'label' }, en.L[key] + (two ? ' · ' + two.L[key] : '')); }
+    function alt(text) { return text ? el('p', { class: 'small alt' }, text) : null; }
+    var tasting = sheetTasting(s).split(',').map(function (x) { return x.trim(); }).filter(Boolean);
     return el('div', { class: 'stack' },
-      el('div', { class: 'row' }, el('h2', null, 'Café spec sheet'), el('span', { class: 'spacer' }),
-        el('button', { class: 'btn primary', type: 'button', onclick: async function () {
+      el('div', { class: 'row no-print' }, el('h2', null, 'Café spec sheet'), el('span', { class: 'spacer' }),
+        el('button', { class: 'btn primary', type: 'button', onclick: function () {
+          try { window.print(); } catch (e) { toast('Printing is blocked here. Use Download HTML and print it from your browser.', true); }
+        } }, 'Print / Save PDF'),
+        el('button', { class: 'btn', type: 'button', onclick: async function () {
+          var text = sheetWhatsApp(s);
+          if (await copyText(text)) { state.copyFallback = null; toast('Copied. Paste it into WhatsApp.'); }
+          else { state.copyFallback = text; toast('Copying is blocked here. Select the text below and copy it.', true); }
+          render();
+        } }, 'Copy for WhatsApp'),
+        el('button', { class: 'btn', type: 'button', onclick: async function () {
           if (await saveFile(E.slug(s.name || 'blend') + '-spec-sheet.html', sheetHtml(s))) toast('Spec sheet saved.');
-        } }, 'Download sheet')),
-      el('section', { class: 'card' },
+        } }, 'Download HTML')),
+      state.copyFallback ? el('section', { class: 'card no-print' }, el('div', { class: 'row' }, el('b', null, 'WhatsApp text'), el('span', { class: 'spacer' }),
+        el('button', { class: 'btn ghost', type: 'button', onclick: function () { state.copyFallback = null; render(); } }, 'Close')),
+        el('textarea', { id: 'sheet-copy', rows: 10, readonly: true, value: state.copyFallback, onfocus: function (e) { e.target.select(); } })) : null,
+      el('section', { class: 'card no-print' },
         el('div', { class: 'grid4' },
-          field('Blend name', el('input', { type: 'text', id: 'sheet-name', value: s.name, oninput: function (e) { s.name = e.target.value; save(); var h = byId('sheet-title'); if (h) h.textContent = s.name; } })),
-          field('Roast date (optional)', el('input', { type: 'date', id: 'sheet-date', value: s.roastDate || '', onchange: function (e) { s.roastDate = e.target.value; save(); render(); } }), 'Only used for rest advice'),
+          field('Blend name', el('input', { type: 'text', id: 'sheet-name', value: s.name, oninput: function (e) { s.name = e.target.value; save(); var hd = byId('sheet-title'); if (hd) hd.textContent = s.name; } })),
+          field('Roast date (optional)', el('input', { type: 'date', id: 'sheet-date', value: s.roastDate || '', onchange: function (e) { s.roastDate = e.target.value; save(); render(); } }), 'Used for the best-before window'),
           field('Second language', el('select', { id: 'sheet-lang', value: s.lang, onchange: function (e) { s.lang = e.target.value; s.translation = null; save(); render(); } },
-            opt('', 'English only'), opt('th', 'Thai (ภาษาไทย)'), opt('id', 'Bahasa Indonesia'))),
-          s.lang && state.sample && !state.aiHidden ? el('div', { class: 'field' }, el('span', null, ' '), el('button', { class: 'btn', type: 'button', disabled: s.busy, onclick: async function () {
+            opt('', 'English only'), opt('id', 'Bahasa Indonesia'), opt('th', 'Thai (ภาษาไทย)')), 'Headings, brew steps, water and rest advice are built in. Blend and bean names stay as typed.'),
+          s.lang && state.sample && !state.aiHidden ? el('div', { class: 'field' }, el('span', null, 'Optional'), el('button', { class: 'btn', type: 'button', disabled: s.busy, onclick: async function () {
             s.busy = true; render();
             try {
-              var res = await state.sample.json('Translate these coffee spec-sheet texts into ' + (s.lang === 'th' ? 'Thai' : 'Bahasa Indonesia') + ' for café buyers. Keep every number, unit and coffee term accurate; do not add claims. Reply with only JSON with the same keys.\n\n' +
-                JSON.stringify({ summary: s.summary, extra: s.recipe.extra, water: s.recipe.water }), { modelTier: 'quick' });
-              s.translation = res && typeof res === 'object' ? { summary: String(res.summary || '').slice(0, 600), extra: String(res.extra || '').slice(0, 600), water: String(res.water || '').slice(0, 800) } : null;
+              var res = await state.sample.json('Translate this coffee cup description into ' + (s.lang === 'th' ? 'Thai' : 'Bahasa Indonesia') + ' for café buyers. Keep every number and coffee term accurate; do not add claims. Reply with only JSON: {"summary": "..."}.\n\n' +
+                JSON.stringify({ summary: s.summary }), { modelTier: 'quick' });
+              s.translation = res && typeof res === 'object' && res.summary ? { summary: String(res.summary).slice(0, 600) } : null;
               if (!s.translation) toast('The assistant didn\'t return a translation.', true);
             } catch (e) { var m = aiError(e && e.code); if (m) toast(m, true); }
             s.busy = false; save(); render();
-          } }, s.busy ? 'Translating…' : 'Translate with the assistant')) : el('span'))),
+          } }, s.busy ? 'Translating…' : 'Also translate the cup description')) : el('span')),
+        el('div', { class: 'grid2' },
+          field('Roastery / seller name', el('input', { type: 'text', id: 'sheet-seller', value: sf.name, maxlength: 120, placeholder: 'e.g. Kopi Senja Supply', oninput: function (e) { sf.name = e.target.value; }, onchange: saveSeller }), 'Saved for every sheet'),
+          field('Contact', el('input', { type: 'text', id: 'sheet-contact', value: sf.contact, maxlength: 200, placeholder: 'e.g. WhatsApp +62 812 0000 0000 · @kopisenja', oninput: function (e) { sf.contact = e.target.value; }, onchange: saveSeller }))),
+        el('div', { class: 'grid2' },
+          field('Tasting notes', el('input', { type: 'text', id: 'sheet-tasting', value: sheetTasting(s), placeholder: 'e.g. dark chocolate, palm sugar, orange', oninput: function (e) { s.tastingText = e.target.value; save(); }, onchange: function () { render(); } }), 'Separate with commas. Starts from the predicted dominant and supporting notes.'),
+          field('Recipe notes', el('textarea', { id: 'sheet-rnotes', rows: 2, value: s.recipeNotes, placeholder: 'e.g. Dial in 1 click finer after day 10.', oninput: function (e) { s.recipeNotes = e.target.value; save(); }, onchange: function () { render(); } })))),
       el('article', { class: 'card sheet' },
         el('h2', { id: 'sheet-title' }, s.name),
-        el('p', { class: 'muted small' }, el('b', null, s.species || E.speciesShare(s.beans, s.beans.map(function (b) { return b.share; })).label), ' · ' + E.BREWS[s.brew].label + ' · ' + s.roast.name + ' roast (Agtron ' + s.roast.agtron + ')' + (s.predicted ? ' · estimated cup score ' + nf(s.predicted.value, 1) : '')),
-        el('div', { class: 'chips' }, s.notes.map(function (n) { return el('span', { class: 'chip' }, n); })),
-        el('p', null, s.summary + (s.acid ? ' Acidity: ' + s.acid + '.' : '')), t && t.summary ? el('p', { class: 'small' }, el('em', null, t.summary)) : null,
-        el('span', { class: 'label' }, 'Components'), tbl(rows.components),
-        el('span', { class: 'label' }, 'Profile as served'), tbl(rows.profile),
-        el('span', { class: 'label' }, 'Recipe: ' + s.recipe.title), tbl(rows.recipe), el('p', { class: 'small' }, s.recipe.extra), t && t.extra ? el('p', { class: 'small' }, el('em', null, t.extra)) : null,
-        el('p', { class: 'small mono' }, 'Targets: ' + s.recipe.targets),
-        el('span', { class: 'label' }, 'Water and resting'), el('p', { class: 'small' }, s.recipe.water), t && t.water ? el('p', { class: 'small' }, el('em', null, t.water)) : null,
-        el('p', { class: 'small' }, restLine(s)),
-        el('p', { class: 'muted small' }, 'The estimated cup score is calculated from component cup scores and is not an official SCA grade.')));
+        el('p', { class: 'muted small' }, headLine(s, en.L)),
+        head('tasting'),
+        el('div', { class: 'chips' }, tasting.map(function (n) { return el('span', { class: 'chip' }, n); })),
+        el('p', null, s.summary + (s.acid ? ' Acidity: ' + s.acid + '.' : '')), t && t.summary ? alt(t.summary) : null,
+        head('components'), tbl(rows.components),
+        head('profile'), tbl(en.profileRows, two && two.profileRows),
+        head('recipe'), el('p', null, el('b', null, en.recipe.title)), tbl(en.recipeRows, two && two.recipeRows),
+        el('p', { class: 'small' }, en.brewText), two ? alt(two.brewText) : null,
+        el('p', { class: 'small mono' }, en.L.targets + ': ' + en.recipe.targets),
+        s.recipeNotes ? [head('recipeNotes'), el('p', { class: 'small' }, s.recipeNotes)] : null,
+        head('water'), el('p', { class: 'small' }, en.water), two ? alt(two.water) : null,
+        el('p', { class: 'small' }, en.rest), two ? alt(two.rest) : null,
+        seller.name || seller.contact ? el('p', { class: 'small seller' }, en.L.seller + (two ? ' / ' + two.L.seller : '') + ': ', el('b', null, seller.name), seller.contact ? ' · ' + seller.contact : '') : null,
+        el('p', { class: 'muted small' }, en.L.disclaimer), two ? el('p', { class: 'muted small' }, two.L.disclaimer) : null));
   }
 
   // ---------------- Batches ----------------
   function viewBatches() {
-    var parts = [el('h2', null, 'Batches')];
-    if (!state.batches.length) parts.push(el('div', { class: 'empty' }, el('p', null, 'No batches logged yet. In the simulator\'s Make it section, enter how many bags you are packing and log the batch. The grams come off your stock.')));
-    parts.push(el('div', { class: 'list' }, state.batches.map(function (t) {
+    var F = filters.batches;
+    var shown = state.batches.filter(function (t) {
+      return (!F.hideUndone || !t.undone) && matches(F.q, [t.lot, t.blendName, t.note].concat((t.items || []).map(function (it) { return it.name; })));
+    });
+    var parts = [el('div', { class: 'row' }, el('h2', null, 'Batches'), el('span', { class: 'spacer' }),
+      state.batches.length ? el('button', { class: 'btn ghost', type: 'button', onclick: exportBatchesCsv }, 'Export CSV') : null)];
+    if (!state.batches.length) parts.push(el('div', { class: 'empty' }, el('p', null, 'No batches logged yet. In the simulator\'s Make it section, choose bags, a total weight or a bean to use up, then log the batch. The grams come off your stock.')));
+    else parts.push(el('div', { class: 'row filterbar' }, searchBox('f-bt-q', F, 'Search lot code, blend, bean or note'),
+      el('label', { class: 'row tight small' }, el('input', { type: 'checkbox', id: 'f-bt-undone', checked: F.hideUndone, onchange: function (e) { F.hideUndone = e.target.checked; render(); } }), 'Hide undone'),
+      el('span', { class: 'muted small' }, shown.length + ' of ' + state.batches.length)));
+    if (state.batches.length && !shown.length) parts.push(el('p', { class: 'muted small' }, 'No batches match.'));
+    parts.push(el('div', { class: 'list' }, shown.map(function (t) {
       return el('article', { class: 'card' + (t.undone ? ' muted' : '') },
-        el('div', { class: 'row' }, el('h3', null, t.blendName), t.undone ? el('span', { class: 'pill warn' }, 'Undone') : null, el('span', { class: 'spacer' }), el('span', { class: 'muted small' }, dateStr(t.createdAt))),
-        el('p', { class: 'small' }, (t.plan || []).map(function (p) { return p.count + ' × ' + bagLabel(p.bagG); }).join(' + ') + ' = ' + fmtKg(t.totalG || 0)),
+        el('div', { class: 'row' }, t.lot ? el('span', { class: 'mono lot' }, t.lot) : null, el('h3', null, t.blendName), t.undone ? el('span', { class: 'pill warn' }, 'Undone') : null, el('span', { class: 'spacer' }), el('span', { class: 'muted small' }, dateStr(t.createdAt))),
+        el('p', { class: 'small' }, batchPlanText(t) + ' = ' + fmtKg(t.totalG || 0)),
+        t.note ? el('p', { class: 'small muted' }, t.note) : null,
         el('div', { class: 'tablewrap' }, el('table', null, el('tbody', null, (t.items || []).map(function (it) { return el('tr', null, el('td', null, it.name), el('td', { class: 'num mono' }, (it.pct != null ? it.pct + '%' : '')), el('td', { class: 'num mono' }, fmtG(it.grams))); })))),
         !t.undone ? el('div', { class: 'row' }, el('button', { class: 'btn', type: 'button', disabled: !!busy['undo:' + t.id], onclick: function () {
           withLock('undo:' + t.id, async function () {
@@ -2033,6 +2425,22 @@
         } }, busy['undo:' + t.id] ? 'Restoring…' : 'Undo and restore stock')) : null);
     })));
     return el('div', { class: 'stack' }, parts);
+  }
+  function batchPlanText(t) {
+    if (t.kind === 'total') return 'Batch by total weight';
+    if (t.kind === 'useup') return 'Used up ' + (t.useName || 'a bean');
+    var p = (t.plan || []).map(function (x) { return x.count + ' × ' + bagLabel(x.bagG); }).join(' + ');
+    return p || 'Batch';
+  }
+  async function exportBatchesCsv() {
+    var rows = [['Lot code', 'Date', 'Blend', 'Brew', 'How', 'Bean', 'Share (%)', 'Grams', 'Batch total (g)', 'Undone', 'Note']];
+    state.batches.forEach(function (t) {
+      var d = new Date(t.createdAt || 0), day = isNaN(d) ? '' : d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+      (t.items || []).forEach(function (it) {
+        rows.push([t.lot || '', day, t.blendName || '', (E.BREWS[t.brew] || {}).label || t.brew || '', batchPlanText(t), it.name, it.pct == null ? '' : it.pct, it.grams, t.totalG || 0, t.undone ? 'yes' : 'no', t.note || '']);
+      });
+    });
+    if (await saveFile('ratio-decider-batches-' + new Date().toISOString().slice(0, 10) + '.csv', toCsv(rows))) toast('Batches exported.');
   }
 
   // ---------------- Origins (with process columns) ----------------
@@ -2106,6 +2514,19 @@
   }
 
   // ---------------- Settings ----------------
+  function stockCard() {
+    var cur = lowStockG(), d = state.lowDraft == null ? String(cur) : state.lowDraft;
+    return el('section', { class: 'card', 'aria-labelledby': 'ls-h' },
+      el('h3', { id: 'ls-h' }, 'Stock'),
+      el('div', { class: 'row' },
+        field('Warn when a bean drops below (grams)', el('input', { type: 'number', id: 'low-stock', min: 0, step: 50, value: d, style: 'width:160px', oninput: function (e) { state.lowDraft = e.target.value; } })),
+        el('button', { class: 'btn', type: 'button', onclick: async function () {
+          var v = Number(state.lowDraft == null ? cur : state.lowDraft);
+          if (state.lowDraft === '' || !isFinite(v) || v < 0) { toast('Enter 0 or more grams.', true); return; }
+          try { await saveSettings({ lowStockG: Math.round(v) }); state.lowDraft = null; toast('Low-stock warning set at ' + fmtKg(Math.round(v)) + '.'); } catch (e) { /* shown */ }
+        } }, 'Save')),
+      el('p', { class: 'muted small' }, 'Beans below this show a Low stock badge under My beans. 0 turns it off except for empty beans.'));
+  }
   function rulesProblem(d) {
     function okNum(v) { return typeof v === 'number' && isFinite(v); }
     var caps = Object.keys(E.BREWS);
@@ -2144,11 +2565,11 @@
           try { await saveSettings({ rules: draft }); state.rulesDraft = null; toast('Rules saved.'); } catch (e) { /* shown */ }
         } }, 'Save rules'),
         el('button', { class: 'btn ghost', type: 'button', onclick: async function () { try { await saveSettings({ rules: {} }); state.rulesDraft = null; toast('Rules reset to defaults.'); } catch (e) { /* shown */ } } }, 'Reset to defaults'))));
-    parts.push(cloudCard(), sourcingCard(), tuneCard(), presetsCard(), notesWordsCard(), originsCard(), backupCard());
+    parts.push(stockCard(), cloudCard(), sourcingCard(), tuneCard(), presetsCard(), notesWordsCard(), originsCard(), backupCard());
     parts.push(el('section', { class: 'card', 'aria-labelledby': 'md-h' },
       el('h3', { id: 'md-h' }, 'How the simulator thinks'),
       el('ul', { class: 'reasons small' },
-        el('li', null, 'It tries every whole-percent ratio (about 1,5 million for 5 beans) and keeps the ones closest to your target as served.'),
+        el('li', null, 'It tries every ratio in 5% steps (practical, the default) or every whole percent (exact: about 1,5 million mixes for 5 beans) and keeps the ones closest to your target as served.'),
         el('li', null, 'Robusta pulls body and bitterness about 2× harder than its share, and liberica and excelsa about 1,4×. Darker roasts pull harder too, up to 1,3× at roast 5.'),
         el('li', null, 'Process shifts the starting scores. Full wash adds acidity and clarity, semi wash (giling basah) adds body and lowers acidity, natural adds sweetness and body.'),
         el('li', null, 'Bitterness above 3 hides acidity, and above 3,5 it hides sweetness. Sweet aromas (caramel, palm sugar, vanilla) lift perceived sweetness and bright fruit lifts perceived acidity, by up to 0,3 each.'),
