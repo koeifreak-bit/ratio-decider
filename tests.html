@@ -57,6 +57,40 @@
   test('Origins: unique ids', function () {
     var seen = {}; RD_ORIGINS.forEach(function (o) { ok(!seen[o.id], 'dup ' + o.id); seen[o.id] = 1; });
   });
+  // ---- v5: Indonesia depth, wheel words, species share ----
+  test('v5 Indonesia has 55+ origins with GI and varietal data', function () {
+    var indo = RD_ORIGINS.filter(function (o) { return o.country === 'Indonesia'; });
+    ok(indo.length >= 55, 'Indonesia ' + indo.length);
+    ok(indo.filter(function (o) { return o.species === 'robusta'; }).length >= 20, 'robusta < 20');
+    ok(indo.filter(function (o) { return o.gi; }).length >= 25, 'GI < 25');
+    ok(indo.filter(function (o) { return o.isNew; }).length === 17, 'new count');
+    ['id-mandailing', 'id-oksibil', 'id-argopuro', 'id-pinogu-r', 'id-rejanglebong-r'].forEach(function (id) { ok(RD_ORIGINS.some(function (o) { return o.id === id; }), 'missing ' + id); });
+  });
+  test('v5 every flavour-wheel word resolves', function () {
+    var words = ['Lavender', 'Hibiscus', 'Jasmine', 'Rose', 'Strawberry', 'Raspberry', 'Blueberry', 'Blackberry', 'Raisin', 'Prune', 'Date', 'Watermelon', 'Honeydew', 'Apple', 'Pear',
+      'Blood orange', 'Orange', 'Lemon', 'Lime', 'Grapefruit', 'Banana', 'Mango', 'Passionfruit', 'Coconut', 'Peach', 'Apricot', 'Plum', 'Cherry', 'Sage', 'Mint', 'Oregano', 'Dill', 'Basil', 'Thyme',
+      'Green tea', 'Black tea', 'Cedar', 'Pine', 'Squash', 'Sweet pea', 'Hay', 'Olive', 'White chocolate', 'Milk chocolate', 'Dark chocolate', 'Cocoa butter', 'Brazil nut', 'Hazelnut', 'Almond', 'Pecan',
+      'Macadamia', 'Walnut', 'Pistachio', 'Sesame', 'Poppy', 'Tobacco', 'Toast', 'Caramel', 'Treacle', 'Smoked', 'Black pepper', 'White pepper', 'Mace', 'Clove', 'Cinnamon', 'Coriander', 'Ginger',
+      'Nutmeg', 'Star anise', 'Whiskey', 'Ale', 'Red wine', 'Mushroom', 'Umami', 'Grain', 'Malt', 'Soy sauce', 'Tomato', 'Golden syrup', 'Honey', 'Maple syrup', 'Molasses', 'Marshmallow', 'Marzipan',
+      'Bubble gum', 'Candy floss',
+      'Floral', 'Fruit', 'Berry', 'Dried', 'Melon', 'Pomes', 'Citrus', 'Tropical', 'Stone fruit', 'Herbal', 'Culinary', 'Tea', 'Vegetal', 'Woody', 'Earthy', 'Cocoa', 'Chocolate', 'Nutty',
+      'Tree nuts', 'Seeds', 'Roasted', 'Spice', 'Pepper', 'Brown spice', 'Fermented', 'Savoury', 'Sweet', 'Syrup', 'Confectionery'];
+    var bad = words.filter(function (w) { return !E.resolveTerm(w, idx); });
+    eq(bad, []);
+  });
+  test('v5 species share labels', function () {
+    eq(E.speciesShare([{ species: 'arabica' }, { species: 'robusta' }], [69, 31]).label, 'Arabica 69% · Robusta 31%');
+    eq(E.speciesShare([{ species: 'arabica' }, { species: 'arabica' }], [40, 60]).label, '100% arabica');
+    eq(E.speciesShare([{ species: 'robusta' }, { species: 'arabica' }], [30, 70]).robusta, 30);
+  });
+  test('v5 robusta limit 0 forces an arabica-only mix', function () {
+    var r = E.solve([bean({ name: 'A', scores: { body: 2 } }), bean({ name: 'R', species: 'robusta', scores: { body: 5 } })],
+      { ranges: { body: [4, null] }, robustaMax: 0 }, { brew: 'kopisusu', index: idx });
+    ok(!r.best || r.best.pcts[1] === 0 || r.status === 'fail', JSON.stringify(r.best && r.best.pcts));
+    var r2 = E.solve([bean({ name: 'A', scores: { body: 2 } }), bean({ name: 'R', species: 'robusta', scores: { body: 5 } })],
+      { ranges: { body: [3, null] }, robustaMax: 40 }, { brew: 'kopisusu', index: idx });
+    ok(r2.best && r2.best.pcts[1] <= 40, JSON.stringify(r2.best && r2.best.pcts));
+  });
 
   // ---- SC1 exact ratio ----
   test('SC1 exact ratio 67/33 for body 3.0', function () {

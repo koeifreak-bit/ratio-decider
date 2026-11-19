@@ -542,6 +542,9 @@
     var sp = t.specialty && t.specialty.on ? t.specialty : null;
     var cap = R.robustaCap[brew] != null ? R.robustaCap[brew] : 100;
     var minScore = null;
+    // Owner's own robusta limit for this blend (0 = arabica only), on top of the brew-style cap.
+    var ownerCap = t.robustaMax != null && t.robustaMax !== '' && isFinite(t.robustaMax) ? Number(t.robustaMax) : null;
+    if (ownerCap != null) cap = Math.min(cap, ownerCap);
     if (sp) {
       var rw = sp.roastWindow || [];
       var wlo = rw[0] === '' || rw[0] == null ? null : Number(rw[0]), whi = rw[1] === '' || rw[1] == null ? null : Number(rw[1]);
@@ -565,7 +568,7 @@
       w: w, ws: ws, nS: nud.map(function (x) { return x[0]; }), nA: nud.map(function (x) { return x[1]; }),
       roast: beans.map(function (b) { return clampRoast(b.roast); }),
       isRob: beans.map(function (b) { return b.species === 'robusta'; }),
-      cap: cap, sp: sp, minScore: minScore, cupScores: cupScores, scoreKnown: scoreKnown,
+      cap: cap, ownerCap: ownerCap, sp: sp, minScore: minScore, cupScores: cupScores, scoreKnown: scoreKnown,
       mode: mode, useIdx: useIdx, bagG: opts.bagG || 250,
       stock: beans.map(function (b) { return b.stockG != null && isFinite(b.stockG) ? Number(b.stockG) : null; })
     };
@@ -840,7 +843,11 @@
     if (sum(maxs) < 100) pre.push('The maximum shares add up to only ' + sum(maxs) + '%.');
     var robMin = 0, allRob = true;
     for (i = 0; i < n; i++) { if (ctx.isRob[i]) robMin += mins[i]; else allRob = false; }
-    if (allRob && ctx.cap < 100) pre.push('Robusta limit ' + ctx.cap + '% for ' + label + ': every bean in this mix is robusta. Add an arabica, or change the brew style.');
+    var robNames = ctx.beans.filter(function (b, k) { return ctx.isRob[k]; }).map(function (b) { return b.name || 'robusta'; });
+    if (ctx.ownerCap != null && ctx.cap === ctx.ownerCap && robMin > ctx.cap) pre.push(ctx.cap === 0
+      ? 'You chose no robusta (100% arabica), but ' + joinAnd(robNames) + (robNames.length > 1 ? ' are' : ' is') + ' robusta. Remove ' + (robNames.length > 1 ? 'them' : 'it') + ', or allow some robusta.'
+      : 'You allowed up to ' + ctx.cap + '% robusta, but the robusta beans need at least ' + robMin + '% at their minimums.');
+    else if (allRob && ctx.cap < 100) pre.push('Robusta limit ' + ctx.cap + '% for ' + label + ': every bean in this mix is robusta. Add an arabica, or change the brew style.');
     else if (robMin > ctx.cap) pre.push('Robusta limit ' + ctx.cap + '% for ' + label + ': the robusta beans need at least ' + robMin + '% at their minimums.');
     for (i = 0; i < n; i++) if (mins[i] > maxs[i]) pre.push((ctx.beans[i].name || 'Bean ' + (i + 1)) + ' has a minimum above its maximum.');
     if (ctx.sp && ctx.sp.arabicaOnly) {
@@ -1397,7 +1404,22 @@
     return { options: out.slice(0, opts.limit || 3), reference: cur, ms: Date.now() - t0 };
   }
 
+  // Share of each species in a mix, e.g. { arabica: 69, robusta: 31 }, plus a plain label.
+  function speciesShare(beans, pcts) {
+    var by = {}, order = ['arabica', 'robusta', 'liberica', 'excelsa'];
+    (beans || []).forEach(function (b, i) {
+      var s = String((b && b.species) || 'arabica').toLowerCase();
+      by[s] = (by[s] || 0) + (Number(pcts && pcts[i]) || 0);
+    });
+    var parts = Object.keys(by).filter(function (k) { return by[k] > 0; })
+      .sort(function (a, b) { return (order.indexOf(a) < 0 ? 9 : order.indexOf(a)) - (order.indexOf(b) < 0 ? 9 : order.indexOf(b)); });
+    var cap = function (s) { return s.charAt(0).toUpperCase() + s.slice(1); };
+    var label = parts.length === 1 ? '100% ' + parts[0] : parts.map(function (k) { return cap(k) + ' ' + by[k] + '%'; }).join(' · ');
+    return { shares: by, robusta: by.robusta || 0, arabica: by.arabica || 0, label: label, pure: parts.length === 1 ? parts[0] : null, parts: parts };
+  }
+
   root.RatioEngine = {
+    speciesShare: speciesShare,
     originAllowed: originAllowed, fitBrewBias: fitBrewBias, substitutes: substitutes, similarity: similarity,
     VARIETALS: VARIETALS, ROAST_COLOURS: ROAST_COLOURS, ACID_TYPES: ACID_TYPES, WATER: WATER,
     scoresForVarietal: scoresForVarietal, acidProfile: acidProfile, recipeFor: recipeFor, roastColour: roastColour,

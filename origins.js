@@ -22,13 +22,13 @@
     ['id-jambi-lib', 'Indonesia', 'Jambi Tanjung Jabung (Liberika)', 'liberica', 'Natural, honey', '0–100 m', 3.5, 2, 3, 3, 'jackfruit, dried fruit, woody'],
     ['id-meranti-lib', 'Indonesia', 'Riau Kepulauan Meranti (Liberika)', 'liberica', 'Natural', '0–50 m', 3.5, 2, 3, 3, 'jackfruit, cocoa, woody'],
     ['id-preanger', 'Indonesia', 'West Java Preanger', 'arabica', 'Washed, natural, honey', '1,200–1,800 m', 3.5, 3, 3.5, 2, 'brown sugar, citrus, spice, floral'],
-    ['id-malabar', 'Indonesia', 'West Java Malabar (Bandung)', 'arabica', 'Washed, natural', '1,400–1,600 m', 3.5, 3, 3.5, 2, 'tropical fruit, palm sugar, citrus'],
+    ['id-malabar', 'Indonesia', 'West Java Malabar (Pangalengan)', 'arabica', 'Washed, natural', '1,400–1,800 m', 3.5, 3, 3.5, 2, 'tropical fruit, palm sugar, citrus'],
     ['id-halu', 'Indonesia', 'West Java Gunung Halu', 'arabica', 'Natural, washed', '1,300–1,600 m', 3.5, 3, 3.5, 2, 'dried fruit, caramel, citrus'],
     ['id-garut', 'Indonesia', 'West Java Garut (Papandayan, Cikuray)', 'arabica', 'Washed, natural', '1,300–1,700 m', 3.5, 3, 3.5, 2, 'caramel, lemon, floral'],
     ['id-puntang', 'Indonesia', 'West Java Gunung Puntang', 'arabica', 'Washed, natural', '1,300–1,600 m', 3.5, 3.5, 3.5, 2, 'jasmine, citrus, honey'],
     ['id-sindoro', 'Indonesia', 'Central Java Sindoro-Sumbing', 'arabica', 'Washed, natural', '1,000–1,600 m', 3.5, 3, 3, 2.5, 'tobacco, spice, caramel'],
     ['id-temanggung-r', 'Indonesia', 'Central Java Temanggung', 'robusta', 'Natural', '600–900 m', 4.5, 1.5, 2.5, 4, 'tobacco, dark chocolate, palm sugar'],
-    ['id-ijen', 'Indonesia', 'East Java Ijen-Raung (Bondowoso)', 'arabica', 'Washed', '1,100–1,600 m', 3.5, 3, 3, 2.5, 'caramel, spice, citrus'],
+    ['id-ijen', 'Indonesia', 'East Java Ijen-Raung (Bondowoso)', 'arabica', 'Washed', '1,100–1,600 m', 3.5, 3, 3, 2.5, 'floral, malt, grape, caramel'],
     ['id-java-estate', 'Indonesia', 'East Java estates (Kayumas, Jampit, Blawan)', 'arabica', 'Washed', '1,000–1,500 m', 3.5, 3, 3, 2.5, 'chocolate, spice, cedar'],
     ['id-arjuno', 'Indonesia', 'East Java Arjuno-Welirang', 'arabica', 'Washed, natural', '1,100–1,500 m', 3.5, 3, 3, 2, 'caramel, nutty, citrus'],
     ['id-dampit', 'Indonesia', 'East Java Dampit (Malang)', 'robusta', 'Natural', '400–700 m', 4.5, 1.5, 2, 4, 'dark chocolate, earthy, nutty'],
@@ -45,6 +45,24 @@
     ['id-wamena', 'Indonesia', 'Papua Wamena (Baliem Valley)', 'arabica', 'Washed, natural', '1,500–2,000 m', 3.5, 3, 4, 2, 'floral, brown sugar, nutty'],
     ['id-moanemani', 'Indonesia', 'Papua Moanemani (Dogiyai)', 'arabica', 'Washed', '1,500–1,800 m', 3.5, 3, 3.5, 2, 'chocolate, honey, citrus'],
     ['id-aceh-r', 'Indonesia', 'Aceh Pidie (Robusta)', 'robusta', 'Natural', '400–900 m', 4.5, 1.5, 2, 4, 'cocoa, earthy, woody'],
+    // Indonesia, added in v5 (altitudes marked ≈ are approximate)
+    ['id-mandailing', 'Indonesia', 'North Sumatra Mandailing Natal', 'arabica', 'Semi-washed, wet-hulled', '1,000–1,500 m', 4.5, 2, 3, 3, 'cocoa, tobacco, earthy, spice'],
+    ['id-sipirok', 'Indonesia', 'North Sumatra Sipirok (Tapanuli Selatan)', 'arabica', 'Wet-hulled, washed', '1,200–1,300 m', 4, 2.5, 3, 2.5, 'brown sugar, spice, herbal'],
+    ['id-kerinci-r', 'Indonesia', 'Jambi Kerinci', 'robusta', 'Natural', '≈700–1,000 m', 4.5, 1.5, 2.5, 4, 'cocoa, palm sugar, earthy'],
+    ['id-empatlawang-r', 'Indonesia', 'South Sumatra Empat Lawang', 'robusta', 'Natural', '≈600–1,100 m', 4.5, 1.5, 2, 4, 'dark chocolate, spice, earthy'],
+    ['id-lahat-r', 'Indonesia', 'South Sumatra Lahat', 'robusta', 'Natural', '≈500–1,000 m', 4.5, 1.5, 2, 4, 'cocoa, nutty, earthy'],
+    ['id-rejanglebong-r', 'Indonesia', 'Bengkulu Rejang Lebong', 'robusta', 'Natural', '800–1,400 m', 5, 1.5, 2, 4, 'dark chocolate, earthy, woody'],
+    ['id-ciwidey', 'Indonesia', 'West Java Ciwidey (Bandung)', 'arabica', 'Washed, natural, honey', '1,300–1,700 m', 3.5, 3, 3.5, 2, 'floral, vanilla, brown sugar, cherry'],
+    ['id-bogor-r', 'Indonesia', 'West Java Bogor', 'robusta', 'Natural', '≈400–900 m', 4.5, 1.5, 2.5, 3.5, 'cocoa, caramel, nutty'],
+    ['id-argopuro', 'Indonesia', 'East Java Hyang Argopuro (Bondowoso)', 'arabica', 'Washed, natural', '≈1,000–1,500 m', 3.5, 2.5, 3, 2.5, 'spice, caramel, chocolate'],
+    ['id-pasuruan-r', 'Indonesia', 'East Java Pasuruan', 'robusta', 'Natural', '≈400–800 m', 4.5, 1.5, 2, 4, 'dark chocolate, nutty, earthy'],
+    ['id-banyuwangi-r', 'Indonesia', 'East Java Banyuwangi', 'robusta', 'Natural', '≈300–800 m', 4.5, 1.5, 2.5, 4, 'cocoa, caramel, earthy'],
+    ['id-lemukih-r', 'Indonesia', 'Bali Lemukih (Buleleng)', 'robusta', 'Natural', '≈500–900 m', 4.5, 1.5, 2.5, 3.5, 'cocoa, spice, palm sugar'],
+    ['id-sembalun', 'Indonesia', 'Lombok Sembalun (Rinjani)', 'arabica', 'Washed, natural', '≈1,100–1,500 m', 3, 3.5, 3, 2, 'citrus, brown sugar, floral'],
+    ['id-bantaeng', 'Indonesia', 'South Sulawesi Bantaeng', 'arabica', 'Washed, natural', '≈1,000–1,600 m', 3.5, 3, 3, 2.5, 'chocolate, citrus, spice'],
+    ['id-latimojong', 'Indonesia', 'South Sulawesi Latimojong (Luwu)', 'arabica', 'Washed, natural', '≈1,400–2,000 m', 3.5, 3.5, 3.5, 2, 'floral, citrus, brown sugar'],
+    ['id-pinogu-r', 'Indonesia', 'Gorontalo Pinogu (Bone Bolango)', 'robusta', 'Natural', '≈300–600 m', 4.5, 1.5, 2.5, 3.5, 'cocoa, spice, woody'],
+    ['id-oksibil', 'Indonesia', 'Papua Oksibil (Pegunungan Bintang)', 'arabica', 'Washed, natural', '≈1,300–1,800 m', 3, 3.5, 3.5, 2, 'citrus, berry, peach, apricot'],
 
     // ---------- Latin America ----------
     ['br-sul-minas', 'Brazil', 'Sul de Minas', 'arabica', 'Natural, pulped natural', '900–1,300 m', 4, 2, 4, 2.5, 'chocolate, nutty, caramel'],
@@ -149,11 +167,58 @@
     ['au-nsw', 'Australia', 'Northern New South Wales', 'arabica', 'Washed, natural', '50–400 m', 3, 2.5, 3.5, 1.5, 'macadamia, caramel, citrus']
   ];
 
+  // Indonesia extras: [Geographical Indication, common varietals]. '' = none on record.
+  var extra = {
+    'id-gayo': ['GI 2010 (also EU-protected)', 'Gayo 1 (Tim Tim), Gayo 2, Ateng, Abyssinia, Bourbon'],
+    'id-mandheling': ['', 'Sigarar Utang, Ateng, Typica'],
+    'id-mandailing': ['GI Arabika Sumatera Mandailing', 'Sigarar Utang, Ateng'],
+    'id-sipirok': ['', 'Sigarar Utang, Ateng'],
+    'id-lintong': ['', 'Sigarar Utang, Ateng'],
+    'id-simalungun': ['GI 2015', 'Sigarar Utang, Ateng'],
+    'id-karo': ['GI 2019', 'Sigarar Utang, Ateng'],
+    'id-sidikalang-a': ['GI 2019', 'Sigarar Utang, Ateng'],
+    'id-kerinci': ['', 'Sigarar Utang, Andungsari'],
+    'id-solok': ['', 'Sigarar Utang, Andungsari'],
+    'id-semendo': ['GI 2014', 'Local robusta clones'],
+    'id-empatlawang-r': ['GI 2015', 'Local robusta clones'],
+    'id-pagaralam': ['GI 2020', 'Local robusta clones'],
+    'id-lahat-r': ['GI 2021', 'Local robusta clones'],
+    'id-rejanglebong-r': ['GI 2019', 'Local robusta clones'],
+    'id-kepahiang': ['GI 2018', 'Local robusta clones'],
+    'id-lampung': ['GI 2014', 'Local robusta clones'],
+    'id-preanger': ['GI 2013', 'Sigarar Utang, Andungsari, Typica'],
+    'id-malabar': ['', 'Sigarar Utang, Andungsari'],
+    'id-ciwidey': ['', 'Sigarar Utang, Typica'],
+    'id-bogor-r': ['GI 2019', 'Local robusta clones'],
+    'id-sindoro': ['GI 2014', 'Sigarar Utang, Typica'],
+    'id-temanggung-r': ['GI 2016', 'Local robusta clones'],
+    'id-ijen': ['GI', 'Typica, S795, Andungsari'],
+    'id-argopuro': ['GI 2022', 'S795, Typica'],
+    'id-pasuruan-r': ['GI 2019', 'Local robusta clones'],
+    'id-banyuwangi-r': ['GI applied 2023', 'Local robusta clones'],
+    'id-kintamani': ['GI 2008 (Indonesia\'s first coffee GI)', 'Kopyol, S795, Typica'],
+    'id-pupuan-r': ['GI 2017', 'Local robusta clones'],
+    'id-lemukih-r': ['GI proposed', 'Local robusta clones'],
+    'id-sembalun': ['', 'S795, Typica'],
+    'id-tambora-r': ['GI 2017', 'Local robusta clones'],
+    'id-bajawa': ['GI 2012', 'S795, Typica'],
+    'id-toraja': ['GI 2013', 'S795, Typica'],
+    'id-kalosi': ['GI', 'S795, Typica'],
+    'id-bantaeng': ['GI', 'S795, Typica'],
+    'id-latimojong': ['', 'S795, Typica'],
+    'id-pinogu-r': ['GI 2017', 'Old local robusta'],
+    'id-wamena': ['GI 2019', 'Typica'],
+    'id-oksibil': ['', 'Typica']
+  };
+  var added = ['id-mandailing', 'id-sipirok', 'id-kerinci-r', 'id-empatlawang-r', 'id-lahat-r', 'id-rejanglebong-r', 'id-ciwidey', 'id-bogor-r',
+    'id-argopuro', 'id-pasuruan-r', 'id-banyuwangi-r', 'id-lemukih-r', 'id-sembalun', 'id-bantaeng', 'id-latimojong', 'id-pinogu-r', 'id-oksibil'];
+
   root.RD_ORIGINS = rows.map(function (r) {
+    var x = extra[r[0]] || ['', ''];
     return {
       id: r[0], country: r[1], region: r[2], species: r[3], process: r[4], altitude: r[5],
       scores: { body: r[6], acidity: r[7], sweetness: r[8], bitterness: r[9] },
-      notes: r[10]
+      notes: r[10], gi: x[0], varietals: x[1], isNew: added.indexOf(r[0]) >= 0
     };
   });
 })(typeof window !== 'undefined' ? window : this);

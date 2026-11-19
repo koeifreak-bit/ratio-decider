@@ -116,7 +116,7 @@
       result: null, sig: '', pcts: null, manual: false,
       plan: { 250: 20, 500: 0, 1000: 5 }, cupping: null, saveName: '', busy: false,
       mode: 'taste', useKey: '', pick: { source: 'mine', maxBeans: 3, roast: 3 },
-      acidType: '', specialty: defaultSpecialty()
+      acidType: '', specialty: defaultSpecialty(), robustaMax: ''
     };
   }
   var sim = lsGet('rd.sim.v2') || defaultSim();
@@ -124,6 +124,7 @@
   sim.mode = sim.mode || 'taste'; sim.useKey = sim.useKey || '';
   sim.acidType = sim.acidType || ''; sim.specialty = Object.assign(defaultSpecialty(), sim.specialty || {});
   sim.pick = sim.pick || { source: 'mine', maxBeans: 3, roast: 3 };
+  if (sim.robustaMax == null) sim.robustaMax = '';
   sim.rows.forEach(function (r) { if (r.kind === 'quick' && !r.process) r.process = mainProcess(originById(r.originId)); });
   var pickRes = null, pickBusy = false;
   function saveSimDraft() { lsSet('rd.sim.v2', Object.assign({}, sim, { result: null, cupping: null, busy: false })); }
@@ -517,7 +518,8 @@
   function simTarget() {
     var must = E.splitTerms(sim.mustText);
     if (sim.acidType) must.push('acid:' + sim.acidType);
-    return { ranges: rangesFrom(sim.ranges), must: must, mustNot: E.splitTerms(sim.notText), specialty: sim.specialty && sim.specialty.on ? sim.specialty : null };
+    return { ranges: rangesFrom(sim.ranges), must: must, mustNot: E.splitTerms(sim.notText), specialty: sim.specialty && sim.specialty.on ? sim.specialty : null,
+      robustaMax: sim.robustaMax === '' || sim.robustaMax == null ? null : Number(sim.robustaMax) };
   }
   function simLimits() { return sim.rows.map(function (r) { return { min: r.min === '' ? null : Number(r.min), max: r.max === '' ? null : Number(r.max) }; }); }
   function simBounds() {
@@ -535,7 +537,7 @@
   }
   function simSig() {
     return JSON.stringify([sim.rows.map(function (r) { var b = r.kind === 'saved' ? beanById(r.beanId) : null; return [r, b && [b.scores, b.calib, b.noteCalib, b.bagNotes, b.roast, b.species, b.process]]; }),
-      sim.brew, sim.ranges, sim.mustText, sim.notText, sim.mode, sim.useKey, sim.acidType, sim.specialty, state.settings]);
+      sim.brew, sim.ranges, sim.mustText, sim.notText, sim.mode, sim.useKey, sim.acidType, sim.specialty, sim.robustaMax, state.settings]);
   }
   function simReady() { return sim.rows.length > 0 && simBeans().every(Boolean); }
   function currentEval() {
@@ -555,11 +557,138 @@
   function simChanged(full) { saveSimDraft(); if (full) render(); else refreshResults(); }
   function clearMix() { sim.pcts = null; sim.result = null; }
 
+  // ---------------- flavour wheel (family · group · note) ----------------
+  // [family, colour, [[group ('' = none), colour, [[note, colour], ...]], ...]]
+  var WHEEL = [
+    ['Floral', '#F06AA6', [['Floral', '#F06AA6', [['Lavender', '#A992D0'], ['Hibiscus', '#E8424B'], ['Jasmine', '#EFD08E'], ['Rose', '#C9566C']]]]],
+    ['Fruit', '#A2486A', [
+      ['Berry', '#4B4F8C', [['Strawberry', '#E2101E'], ['Raspberry', '#E33A5A'], ['Blueberry', '#4A7DB0'], ['Blackberry', '#4A1720']]],
+      ['Dried', '#7A4A5E', [['Raisin', '#5E2E2A'], ['Prune', '#4E2F3A'], ['Date', '#8E1C1C']]],
+      ['Melon', '#8DAA4F', [['Watermelon', '#C9474C'], ['Honeydew', '#F2C500']]],
+      ['Pomes', '#A8B48A', [['Apple', '#7FA81A'], ['Pear', '#9C9A35']]],
+      ['Citrus', '#E39B2E', [['Blood orange', '#AA0E14'], ['Orange', '#F28A10'], ['Lemon', '#F6C40E'], ['Lime', '#8FBF1E'], ['Grapefruit', '#F2747A']]],
+      ['Tropical', '#E6CF6B', [['Banana', '#F7C81E'], ['Mango', '#F5B31A'], ['Passionfruit', '#F2943A'], ['Coconut', '#EDDCC5']]],
+      ['Stone fruit', '#B8545E', [['Peach', '#F59E73'], ['Apricot', '#EE7A2E'], ['Plum', '#8E0C26'], ['Cherry', '#B40F2A']]]
+    ]],
+    ['Herbal', '#7FA34E', [
+      ['Culinary', '#4F8A55', [['Sage', '#86B06D'], ['Mint', '#22C55E'], ['Oregano', '#4FA33A'], ['Dill', '#78B320'], ['Basil', '#2E7D1E'], ['Thyme', '#4B4B10']]],
+      ['Tea', '#6A7B16', [['Green tea', '#9E9A50'], ['Black tea', '#5F5A55']]]
+    ]],
+    ['Vegetal', '#0F7F3E', [
+      ['Woody', '#6B5E50', [['Cedar', '#72A86A'], ['Pine', '#2F6B57']]],
+      ['Earthy', '#7F944C', [['Squash', '#E2B21E'], ['Sweet pea', '#A9B66E'], ['Hay', '#C2A98A'], ['Olive', '#B59A12']]]
+    ]],
+    ['Cocoa', '#4B3420', [['Chocolate', '#7A4E12', [['White chocolate', '#F1E3C8'], ['Milk chocolate', '#B5703A'], ['Dark chocolate', '#5A3A2A'], ['Cocoa butter', '#EFD27A']]]]],
+    ['Nutty', '#8A6050', [
+      ['Tree nuts', '#7B4A32', [['Brazil nut', '#C8743A'], ['Hazelnut', '#B0663A'], ['Almond', '#C75A12'], ['Pecan', '#8F3328'], ['Macadamia', '#EBCB52'], ['Walnut', '#D2A65E'], ['Pistachio', '#B9CF3A']]],
+      ['Seeds', '#A8865A', [['Sesame', '#E2D3A8'], ['Poppy', '#6E7179']]]
+    ]],
+    ['Roasted', '#6E4228', [['', '#7A4A2E', [['Tobacco', '#C77E2E'], ['Toast', '#A74B12'], ['Caramel', '#9A2F12'], ['Treacle', '#4A1A12'], ['Smoked', '#C6A884']]]]],
+    ['Spice', '#A8322E', [
+      ['Pepper', '#8E7F72', [['Black pepper', '#6B4A48'], ['White pepper', '#E3DCCB']]],
+      ['Brown spice', '#923F3F', [['Mace', '#D65E3E'], ['Clove', '#5A3626'], ['Cinnamon', '#C4651E'], ['Coriander', '#CF8C5A'], ['Ginger', '#F3C08A'], ['Nutmeg', '#C79A78'], ['Star anise', '#8A2C2E']]]
+    ]],
+    ['Fermented', '#9C6A55', [['', '#A47460', [['Whiskey', '#D9620A'], ['Ale', '#B52F12'], ['Red wine', '#991B2E']]]]],
+    ['Savoury', '#C54C45', [['', '#CC5B53', [['Mushroom', '#D4C2B4'], ['Umami', '#C49A70'], ['Grain', '#E7C98F'], ['Malt', '#C17A10'], ['Soy sauce', '#5E0A0C'], ['Tomato', '#D91B1B']]]]],
+    ['Sweet', '#E58A4A', [
+      ['Syrup', '#D9A06E', [['Golden syrup', '#E58C10'], ['Honey', '#C26A1E'], ['Maple syrup', '#B86A3A'], ['Molasses', '#4A1414']]],
+      ['Confectionery', '#8A6CC2', [['Marshmallow', '#EFBBC5'], ['Marzipan', '#D8C89A'], ['Bubble gum', '#8FC5BC'], ['Candy floss', '#E87F8E']]]
+    ]]
+  ];
+  var wheelUI = { mode: 'must', big: false };
+  document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && wheelUI.big) { wheelUI.big = false; render(); } });
+  function wheelInk(hex) {
+    var n = parseInt(hex.slice(1), 16);
+    var f = function (c) { c /= 255; return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4); };
+    return 0.2126 * f((n >> 16) & 255) + 0.7152 * f((n >> 8) & 255) + 0.0722 * f(n & 255) > 0.36 ? '#1C1A17' : '#FFFFFF';
+  }
+  function termHas(text, name) { var k = name.toLowerCase(); return E.splitTerms(text).some(function (t) { return t.toLowerCase() === k; }); }
+  function termToggle(text, name, on) {
+    var k = name.toLowerCase(), list = E.splitTerms(text).filter(function (t) { return t.toLowerCase() !== k; });
+    if (on) list.push(name.toLowerCase());
+    return list.join(', ');
+  }
+  function wheelTap(name) {
+    var key = wheelUI.mode === 'must' ? 'mustText' : 'notText', other = key === 'mustText' ? 'notText' : 'mustText';
+    var on = !termHas(sim[key], name);
+    sim[key] = termToggle(sim[key], name, on);
+    if (on) sim[other] = termToggle(sim[other], name, false);
+    simChanged(true);
+  }
+  function wheelEl(S) {
+    var total = 0;
+    WHEEL.forEach(function (f) { f[2].forEach(function (g) { total += g[2].length; }); });
+    var step = 360 / total, gap = 0.25, a = 0, small = S < 500;
+    var noteStops = [], subStops = [], catStops = [], rimStops = [], labels = [];
+    function lab(deg, r, w, fs, fg, text, extra, onclick, aria, pressed) {
+      var h = Math.max(fs + 6, 10), flip = deg > 180;
+      return el('button', { type: 'button', class: 'wl', onclick: onclick, title: aria || text, 'aria-label': aria || text, 'aria-pressed': pressed,
+        style: 'width:' + w + 'px;height:' + h + 'px;line-height:' + h + 'px;font-size:' + fs + 'px;color:' + fg + ';' +
+          'transform:translate(-50%,-50%) rotate(' + (deg - 90) + 'deg) translateX(' + r + 'px)' + (flip ? ' rotate(180deg)' : '') + ';' + (extra || '') }, text);
+    }
+    WHEEL.forEach(function (fam) {
+      var c0 = a;
+      fam[2].forEach(function (grp) {
+        var g0 = a;
+        grp[2].forEach(function (nt) {
+          var s0 = a, s1 = a + step, name = nt[0];
+          var isMust = termHas(sim.mustText, name), isNot = termHas(sim.notText, name);
+          noteStops.push(nt[1] + ' ' + s0 + 'deg ' + (s1 - gap) + 'deg', 'var(--bg) ' + (s1 - gap) + 'deg ' + s1 + 'deg');
+          rimStops.push((isMust ? 'var(--ok)' : isNot ? 'var(--bad)' : 'transparent') + ' ' + s0 + 'deg ' + s1 + 'deg');
+          var on = isMust || isNot;
+          labels.push(lab((s0 + s1) / 2, S * 0.395, S * 0.18, small ? 6.5 : 11, on ? '#1C1A17' : wheelInk(nt[1]), (isMust ? '✓ ' : isNot ? '✕ ' : '') + name,
+            on ? 'background:rgba(255,255,255,.94);box-shadow:0 1px 3px rgba(0,0,0,.3);' : '', function () { wheelTap(name); },
+            name + (isMust ? ', must taste' : isNot ? ', must not taste' : ''), on ? 'true' : 'false'));
+          a = s1;
+        });
+        subStops.push(grp[1] + ' ' + g0 + 'deg ' + (a - gap) + 'deg', 'var(--bg) ' + (a - gap) + 'deg ' + a + 'deg');
+        if (grp[0]) labels.push(lab((g0 + a) / 2, S * 0.235, S * 0.12, small ? 6.5 : 12, wheelInk(grp[1]), grp[0], '', function () { wheelTap(grp[0]); }, grp[0] + ' (whole group)'));
+      });
+      catStops.push(fam[1] + ' ' + c0 + 'deg ' + (a - gap) + 'deg', 'var(--bg) ' + (a - gap) + 'deg ' + a + 'deg');
+      labels.push(lab((c0 + a) / 2, S * 0.13, S * 0.1, small ? 7.5 : 15, wheelInk(fam[1]), fam[0], 'font-weight:700;', function () { wheelTap(fam[0]); }, fam[0] + ' (whole family)'));
+    });
+    function ring(f, bg) { return el('div', { class: 'wr', style: 'width:' + (S * f) + 'px;height:' + (S * f) + 'px;background:conic-gradient(' + bg.join(', ') + ')' }); }
+    return el('div', { class: 'wheel', style: 'width:' + S + 'px;height:' + S + 'px' },
+      ring(1, rimStops), ring(0.976, noteStops), ring(0.59, subStops), ring(0.35, catStops),
+      labels,
+      el('div', { class: 'wr wc', style: 'width:' + (S * 0.17) + 'px;height:' + (S * 0.17) + 'px;font-size:' + (small ? 8 : 13) + 'px' }, wheelUI.mode === 'must' ? 'Tap = must taste' : 'Tap = must not'));
+  }
+  function wheelModeSeg() {
+    return el('div', { class: 'seg', role: 'radiogroup', 'aria-label': 'What a tap on the wheel does' },
+      [['must', 'Must taste'], ['not', 'Must not taste']].map(function (o) {
+        return el('label', null, el('input', { type: 'radio', name: 'wmode' + (wheelUI.big ? 'b' : ''), value: o[0], checked: wheelUI.mode === o[0], onchange: function () { wheelUI.mode = o[0]; render(); } }), el('span', null, o[1]));
+      }));
+  }
+  function wheelCard() {
+    var musts = E.splitTerms(sim.mustText), nots = E.splitTerms(sim.notText);
+    return el('section', { class: 'card wheel-card', 'aria-labelledby': 'wh-h' },
+      el('div', { class: 'row' }, el('h2', { id: 'wh-h' }, 'Flavour wheel'), el('span', { class: 'spacer' }),
+        el('button', { class: 'btn ghost', type: 'button', onclick: function () { wheelUI.big = true; render(); } }, 'Open large')),
+      el('p', { class: 'muted small' }, 'Family · group · note. Tap a note to add it to the cup you want; tap again to remove it.'),
+      wheelModeSeg(),
+      el('div', { class: 'wheel-wrap' }, wheelEl(Math.max(260, Math.min(320, window.innerWidth - 64)))),
+      el('div', { class: 'chips' }, musts.map(function (t) { return el('span', { class: 'chip must' }, '✓ ' + t); }), nots.map(function (t) { return el('span', { class: 'chip not' }, '✕ ' + t); })));
+  }
+  function wheelOverlay() {
+    if (!wheelUI.big) return null;
+    var S = Math.max(320, Math.min(820, window.innerHeight - 150, window.innerWidth - 48));
+    function close() { wheelUI.big = false; render(); }
+    return el('div', { class: 'overlay', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Flavour wheel', onclick: function (e) { if (e.target === e.currentTarget) close(); },
+      onkeydown: function (e) { if (e.key === 'Escape') close(); } },
+      el('div', { class: 'overlay-box' },
+        el('div', { class: 'row' }, el('h2', null, 'Flavour wheel'), wheelModeSeg(), el('span', { class: 'spacer' }),
+          el('span', { class: 'muted small' }, E.splitTerms(sim.mustText).length + ' must · ' + E.splitTerms(sim.notText).length + ' must not'),
+          el('button', { class: 'btn primary', type: 'button', id: 'wheel-close', onclick: close }, 'Done')),
+        el('div', { class: 'wheel-wrap' }, wheelEl(S))));
+  }
+
   // ---------------- simulator: view ----------------
   function viewSimulator() {
     return el('div', { class: 'sim' },
       el('div', { class: 'stack' }, targetCard(), mixCard(), pickerCard()),
-      el('div', { class: 'stack', id: 'results' }, resultsContent()));
+      el('div', { class: 'stack', id: 'results' }, resultsContent()),
+      el('aside', { class: 'stack sim-side' }, wheelCard()),
+      wheelOverlay());
   }
   function refreshResults() { var r = byId('results'); if (r) { clear(r); append(r, [resultsContent()]); } }
 
@@ -567,6 +696,7 @@
     var p = E.PRESETS.concat(state.settings.customPresets || []).filter(function (x) { return x.id === id; })[0];
     if (!p) return;
     sim.brew = p.brew; sim.mustText = p.must || ''; sim.notText = p.mustNot || ''; sim.acidType = p.acidType || '';
+    sim.robustaMax = p.robustaMax != null ? String(p.robustaMax) : (p.specialty && p.specialty.arabicaOnly ? '0' : '');
     sim.specialty = p.specialty ? Object.assign(defaultSpecialty(), JSON.parse(JSON.stringify(p.specialty))) : Object.assign(defaultSpecialty(), { on: false });
     sim.ranges = {};
     TATTRS.forEach(function (a) { var r = (p.ranges || {})[a] || ['', '']; sim.ranges[a] = [String(r[0] == null ? '' : r[0]), String(r[1] == null ? '' : r[1])]; });
@@ -622,8 +752,12 @@
           ['SG', 'TH', 'ID'].map(function (rg) { return el('optgroup', { label: REGION_LABEL[rg] }, E.PRESETS.filter(function (p) { return p.region === rg; }).map(function (p) { return opt(p.id, p.name.replace(/^[A-Za-z]+: /, '')); })); }),
           el('optgroup', { label: 'Indonesian everyday styles' }, E.PRESETS.filter(function (p) { return !p.region; }).map(function (p) { return opt(p.id, p.name); })),
           mine.length ? el('optgroup', { label: 'My styles' }, mine.map(function (p) { return opt(p.id, p.name); })) : null)))),
-      el('div', { class: 'stack', style: 'gap:6px' }, el('span', { class: 'label' }, 'Served as'), brewSeg,
-        el('span', { class: 'muted small' }, 'Robusta limit for this style: ' + R.robustaCap[sim.brew] + '%')),
+      el('div', { class: 'stack', style: 'gap:6px' }, el('span', { class: 'label' }, 'Served as'), brewSeg),
+      el('div', { class: 'stack', style: 'gap:6px' }, el('span', { class: 'label', id: 'rob-l' }, 'Robusta in the blend'),
+        el('div', { class: 'seg', role: 'radiogroup', 'aria-labelledby': 'rob-l' }, [['0', 'None · 100% arabica'], ['20', 'Up to 20%'], ['40', 'Up to 40%'], ['', 'Style limit']].map(function (o) {
+          return el('label', null, el('input', { type: 'radio', name: 'robmax', id: 'robmax-' + (o[0] || 'any'), value: o[0], checked: String(sim.robustaMax) === o[0], onchange: function () { sim.robustaMax = o[0]; simChanged(true); } }), el('span', null, o[1]));
+        })),
+        el('span', { class: 'muted small' }, 'Limit used: ' + Math.min(R.robustaCap[sim.brew], sim.robustaMax === '' ? 100 : Number(sim.robustaMax)) + '% robusta (' + (BREW_SHORT[sim.brew] || sim.brew) + ' style allows ' + R.robustaCap[sim.brew] + '%). Every result shows its arabica / robusta share.')),
       el('div', { class: 'tablewrap' }, el('table', null,
         el('thead', null, el('tr', null, el('th', null, 'As served'), el('th', null, 'From'), el('th', null, 'To'))),
         el('tbody', null, TATTRS.map(function (a) {
@@ -652,6 +786,7 @@
           var name = (state.presetName || '').trim();
           if (!name) { toast('Type a name for the style first.', true); return; }
           var p = { id: uid('p'), name: name, brew: sim.brew, ranges: JSON.parse(JSON.stringify(sim.ranges)), must: sim.mustText, mustNot: sim.notText, acidType: sim.acidType,
+            robustaMax: sim.robustaMax === '' ? null : Number(sim.robustaMax),
             specialty: sim.specialty.on ? JSON.parse(JSON.stringify(sim.specialty)) : null };
           try { await saveSettings({ customPresets: (state.settings.customPresets || []).concat([p]) }); state.presetName = ''; toast('Saved style "' + name + '".'); } catch (e) { /* shown */ }
         } }, 'Save as my style')));
@@ -849,8 +984,8 @@
           return el('div', { class: 'alt' },
             el('div', { class: 'row' }, el('b', null, '#' + (n + 1)),
               p.result.status === 'warn' && p.result.warnings.every(function (w) { return /^Add a cup score/.test(w); }) ? el('span', { class: 'pill ok', title: 'Fits the target. Add cup scores to confirm the high-end score.' }, '✓ Possible · needs cup scores') : statusPill(p.result.status, p.result.headline),
-              el('span', { class: 'spacer' }), el('span', { class: 'mono' }, best.pcts.join(' : '))),
-            el('div', { class: 'legend' }, p.beans.map(function (b, i) { return el('span', null, el('span', { class: 'dot', style: 'background:' + BEAN_COLORS[i] }), b.name, ' ', procBadge(b.process), ' ', el('b', { class: 'mono' }, best.pcts[i] + '%')); })),
+              shareBadge(p.beans, best.pcts), el('span', { class: 'spacer' }), el('span', { class: 'mono' }, best.pcts.join(' : '))),
+            el('div', { class: 'legend' }, p.beans.map(function (b, i) { return el('span', null, el('span', { class: 'dot', style: 'background:' + BEAN_COLORS[i] }), b.name, ' ', speciesBadge(b.species), ' ', procBadge(b.process), ' ', el('b', { class: 'mono' }, best.pcts[i] + '%')); })),
             el('p', { class: 'small' }, best.notes.summary),
             el('p', { class: 'muted small' }, 'Balance ' + nf(best.form.balance, 1) + ' · ' + (best.robust === 1 ? 'holds within ±2% weighing error' : 'sensitive to weighing errors')),
             el('button', { class: 'btn', type: 'button', onclick: function () { usePick(p); } }, 'Use this mix'));
@@ -897,7 +1032,20 @@
     return el('div', { class: 'ratiobar', role: 'img', 'aria-label': 'Ratio bar' }, pcts.map(function (p, i) { return el('div', { style: 'width:' + p + '%;background:' + BEAN_COLORS[i] }); }));
   }
   function legend(beans, pcts) {
-    return el('div', { class: 'legend' }, beans.map(function (b, i) { return el('span', null, el('span', { class: 'dot', style: 'background:' + BEAN_COLORS[i] }), b.name + ' ', el('b', { class: 'mono' }, pcts[i] + '%')); }));
+    return el('div', { class: 'legend' }, beans.map(function (b, i) { return el('span', null, el('span', { class: 'dot', style: 'background:' + BEAN_COLORS[i] }), b.name + ' ', speciesBadge(b.species), ' ', el('b', { class: 'mono' }, pcts[i] + '%')); }));
+  }
+  // Arabica / robusta share of a mix, always shown with a result.
+  function shareBadge(beans, pcts) {
+    var s = E.speciesShare(beans, pcts);
+    return el('span', { class: 'pill species ' + (s.pure === 'arabica' ? 'ara' : 'mixed'), title: 'Species in this blend' }, s.label);
+  }
+  function shareBlock(beans, pcts) {
+    var s = E.speciesShare(beans, pcts);
+    var col = { arabica: 'var(--ara)', robusta: 'var(--rob)', liberica: 'var(--warn)', excelsa: 'var(--warn)' };
+    return el('div', { class: 'species-box' },
+      el('div', { class: 'row tight' }, el('span', { class: 'label' }, 'Species in this blend'), el('span', { class: 'spacer' }), shareBadge(beans, pcts)),
+      el('div', { class: 'ratiobar thin', role: 'img', 'aria-label': s.label }, s.parts.map(function (k) { return el('div', { style: 'width:' + s.shares[k] + '%;background:' + (col[k] || 'var(--ink-2)') }); })),
+      el('span', { class: 'muted small' }, s.robusta ? 'Contains robusta: ' + s.robusta + '% of the weight. Say so on the label.' : 'No robusta. You can sell it as 100% ' + (s.pure || 'arabica') + '.'));
   }
   function robustPill(r) {
     if (r === 1) return el('span', { class: 'pill ok', title: 'Every ±2% weighing error keeps the verdict' }, '✓ Holds within ±2% weighing error');
@@ -932,7 +1080,7 @@
     return el('section', { class: 'verdict ' + ev.status, 'aria-label': 'Verdict' },
       el('div', { class: 'row' }, statusPill(ev.status, ev.headline), ev.status !== 'fail' ? robustPill(ev.robust) : null, qualityPills(ev), el('span', { class: 'spacer' }),
         el('span', { class: 'muted small mono' }, sim.manual ? 'Your adjusted mix' : res.searched ? 'Best of ' + nf(res.searched) + ' mixes · ' + nf(res.ms) + ' ms' : 'From a saved blend or pick')),
-      ratioText(sim.pcts), ratioBar(sim.pcts), legend(beans, sim.pcts),
+      ratioText(sim.pcts), ratioBar(sim.pcts), legend(beans, sim.pcts), shareBlock(beans, sim.pcts),
       modeNote ? el('p', { class: 'muted small' }, modeNote) : null,
       round ? el('div', { class: 'row small' }, el('span', null, 'Rounder option: ', el('b', { class: 'mono' }, round.pcts.join(' : ')), ', also ' + round.headline.toLowerCase() + '. Easier to weigh.'),
         el('button', { class: 'btn ghost', type: 'button', onclick: function () { sim.pcts = round.pcts.slice(); sim.manual = true; simChanged(true); } }, 'Use ' + round.pcts.join(' : '))) : null,
@@ -1017,10 +1165,11 @@
         fams.map(function (f) { return el('div', { class: 'fam' }, el('span', null, LEX.families[f].label), el('div', null, el('div', { class: 'bar', style: 'width:' + Math.round(ev.notes.families[f] / maxF * 100) + '%' })), el('span', { class: 'mono small' }, nf(ev.notes.families[f], 2))); })) : null);
   }
   function altsBlock(alts) {
+    var beans = simBeans();
     return el('section', { class: 'card', 'aria-labelledby': 'alt-h' },
       el('h3', { id: 'alt-h' }, 'Other mixes worth cupping'),
       el('div', { class: 'grid2' }, alts.map(function (a) {
-        return el('div', { class: 'alt' }, el('div', { class: 'row' }, statusPill(a.status, a.headline)),
+        return el('div', { class: 'alt' }, el('div', { class: 'row' }, statusPill(a.status, a.headline), shareBadge(beans, a.pcts)),
           el('div', { class: 'mono', style: 'font-size:1.2rem;font-weight:600' }, a.pcts.join(' : ')), ratioBar(a.pcts),
           el('p', { class: 'small muted' }, a.notes.summary),
           el('p', { class: 'small muted' }, 'Balance ' + nf(a.form.balance, 1) + ' · finish ' + nf(a.form.finish, 1)),
@@ -1463,7 +1612,7 @@
       var confirming = state.confirm === 'blend:' + bl.id;
       return el('article', { class: 'card' },
         el('div', { class: 'row' }, el('h3', null, bl.name), r ? statusPill(r.ev.status, r.ev.headline) : el('span', { class: 'pill fail' }, 'A bean was deleted'), el('span', { class: 'spacer' }), el('span', { class: 'muted small' }, dateStr(bl.createdAt))),
-        el('div', { class: 'mono', style: 'font-size:1.15rem;font-weight:600' }, bl.pcts.join(' : ')),
+        el('div', { class: 'row' }, el('span', { class: 'mono', style: 'font-size:1.15rem;font-weight:600' }, bl.pcts.join(' : ')), r ? shareBadge(r.beans, bl.pcts) : null),
         r ? legend(r.beans, bl.pcts) : null, ratioBar(bl.pcts),
         el('p', { class: 'small muted' }, (E.BREWS[bl.brew] || E.BREWS.filter).label + ' · ' + (r ? r.ev.notes.summary : bl.summary || '')),
         bl.reference ? consistencyBlock(bl, r) : null,
@@ -1546,7 +1695,7 @@
       var bl = state.blends.filter(function (b) { return b.id === id; })[0];
       var r = bl && evalBlend(bl);
       return el('div', { class: 'stack' }, pick(i),
-        r ? [statusPill(r.ev.status, r.ev.headline), el('div', { class: 'mono' }, bl.pcts.join(' : ') + ' · ' + (E.BREWS[bl.brew] || E.BREWS.filter).label),
+        r ? [statusPill(r.ev.status, r.ev.headline), el('div', { class: 'mono' }, bl.pcts.join(' : ') + ' · ' + (E.BREWS[bl.brew] || E.BREWS.filter).label), shareBadge(r.beans, bl.pcts),
           el('div', { class: 'meters' }, TATTRS.map(function (a) { return meter(AL[a], r.ev.values[a], null); }),
             meter('Balance', r.ev.form.balance), meter('Complexity', r.ev.form.complexity), meter('Finish', r.ev.form.finish)),
           el('p', { class: 'small' }, r.ev.notes.summary)] : el('p', { class: 'muted small' }, 'Can\'t evaluate: a bean in this blend was deleted.'));
@@ -1564,6 +1713,7 @@
         return { name: b.name, share: sim.pcts[i], origin: o ? o.country + ', ' + o.region : '', process: procLabel(b.process), varietal: b.varietal && b.varietal !== 'unknown' ? E.VARIETALS[b.varietal].label : '',
           producer: b.producer || '', altitude: b.altitude || (o ? o.altitude : ''), species: b.species, cupScore: b.cupScore };
       }),
+      species: E.speciesShare(beans, sim.pcts).label,
       roast: E.roastColour(ev.values.roast), summary: ev.notes.summary,
       notes: ev.notes.notes.filter(function (n) { return n.tier === 'dominant' || n.tier === 'supporting'; }).map(function (n) { return n.label; }),
       values: ev.values, predicted: ev.predicted, acid: ev.acid.dominant ? E.ACID_TYPES[ev.acid.dominant].label : '',
@@ -1575,7 +1725,7 @@
   function sheetRows(s) {
     var r = s.recipe;
     return {
-      components: s.beans.map(function (b) { return [b.share + '%', b.name, [b.origin, b.process, b.varietal, b.producer, b.altitude].filter(Boolean).join(' · ')]; }),
+      components: s.beans.map(function (b) { return [b.share + '%', b.name, [b.species ? b.species.charAt(0).toUpperCase() + b.species.slice(1) : '', b.origin, b.process, b.varietal, b.producer, b.altitude].filter(Boolean).join(' · ')]; }),
       profile: TATTRS.map(function (a) { return [AL[a], nf(s.values[a], 1) + ' / 5']; }),
       recipe: [['Dose', r.dose], ['Output', r.yield], ['Ratio', r.ratio], ['Water temp', r.temp], ['Time', r.time], ['Grind', r.grind]]
     };
@@ -1593,7 +1743,7 @@
     function table(list) { return '<table>' + list.map(function (r) { return '<tr>' + r.map(function (c, i) { return (i ? '<td>' : '<th>') + esc(c) + (i ? '</td>' : '</th>'); }).join('') + '</tr>'; }).join('') + '</table>'; }
     return '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>' + esc(s.name) + ' · spec sheet</title>' +
       '<style>body{font:15px/1.5 system-ui,sans-serif;max-width:760px;margin:24px auto;padding:0 16px;color:#1d1a17}h1{font-family:Georgia,serif;margin:0}h2{font-size:14px;text-transform:uppercase;letter-spacing:.08em;color:#7a3e1d;margin:22px 0 6px}table{border-collapse:collapse;width:100%}th,td{text-align:left;padding:5px 8px;border-bottom:1px solid #ddd;vertical-align:top}.muted{color:#666;font-size:13px}.tag{display:inline-block;background:#f2e5db;color:#7a3e1d;border-radius:99px;padding:2px 10px;margin:2px;font-size:13px}</style></head><body>' +
-      '<h1>' + esc(s.name) + '</h1><p class="muted">' + esc(E.BREWS[s.brew].label) + ' · ' + esc(s.roast.name) + ' roast (Agtron ' + esc(s.roast.agtron) + ')' +
+      '<h1>' + esc(s.name) + '</h1><p class="muted">' + esc(s.species || E.speciesShare(s.beans, s.beans.map(function (b) { return b.share; })).label) + ' · ' + esc(E.BREWS[s.brew].label) + ' · ' + esc(s.roast.name) + ' roast (Agtron ' + esc(s.roast.agtron) + ')' +
       (s.predicted ? ' · estimated cup score ' + esc(nf(s.predicted.value, 1)) : '') + '</p>' +
       '<p>' + s.notes.map(function (n) { return '<span class="tag">' + esc(n) + '</span>'; }).join('') + '</p><p>' + esc(s.summary) + (s.acid ? ' Acidity: ' + esc(s.acid) + '.' : '') + '</p>' +
       (t && t.summary ? '<p><em>' + esc(t.summary) + '</em></p>' : '') +
@@ -1634,7 +1784,7 @@
           } }, s.busy ? 'Translating…' : 'Translate with the assistant')) : el('span'))),
       el('article', { class: 'card sheet' },
         el('h2', null, s.name),
-        el('p', { class: 'muted small' }, E.BREWS[s.brew].label + ' · ' + s.roast.name + ' roast (Agtron ' + s.roast.agtron + ')' + (s.predicted ? ' · estimated cup score ' + nf(s.predicted.value, 1) : '')),
+        el('p', { class: 'muted small' }, el('b', null, s.species || E.speciesShare(s.beans, s.beans.map(function (b) { return b.share; })).label), ' · ' + E.BREWS[s.brew].label + ' · ' + s.roast.name + ' roast (Agtron ' + s.roast.agtron + ')' + (s.predicted ? ' · estimated cup score ' + nf(s.predicted.value, 1) : '')),
         el('div', { class: 'chips' }, s.notes.map(function (n) { return el('span', { class: 'chip' }, n); })),
         el('p', null, s.summary + (s.acid ? ' Acidity: ' + s.acid + '.' : '')), t && t.summary ? el('p', { class: 'small' }, el('em', null, t.summary)) : null,
         el('span', { class: 'label' }, 'Components'), tbl(rows.components),
@@ -1677,16 +1827,30 @@
       el('div', { class: 'proc-scores' }, ATTRS.map(function (a) { return el('span', null, AL[a].charAt(0) + (a === 'bitterness' ? 'i' : '') + ' ', el('b', null, nf(s[a], 1))); })),
       el('span', { class: 'small' }, offered ? '● typical' : 'estimate'));
   }
+  function islandOf(o) {
+    if (o.country !== 'Indonesia') return '';
+    var r = o.region || '';
+    if (/Sumatra|Aceh|Jambi|Bengkulu|Lampung|Riau/i.test(r)) return 'Sumatra';
+    if (/Java/i.test(r)) return 'Java';
+    if (/Bali|Lombok|Nusa Tenggara|Flores|Tambora|Sumbawa/i.test(r)) return 'Bali & Nusa Tenggara';
+    if (/Sulawesi|Gorontalo/i.test(r)) return 'Sulawesi';
+    if (/Papua/i.test(r)) return 'Papua';
+    return 'Other islands';
+  }
   function viewOrigins() {
     var q = state.oq = state.oq || { text: '', species: '', country: '', process: '' };
+    q.island = q.island || ''; q.gi = !!q.gi; q.onlyNew = !!q.onlyNew;
     var all = origins();
     var countries = Array.from(new Set(all.map(function (o) { return o.country; }))).sort(function (a, b) { return a === 'Indonesia' ? -1 : b === 'Indonesia' ? 1 : a.localeCompare(b); });
     var t = q.text.toLowerCase();
     var list = all.filter(function (o) {
       return (!q.species || o.species === q.species) && (!q.country || o.country === q.country) &&
         (!q.process || E.offeredProcesses(o.process).indexOf(q.process) >= 0) &&
-        (!t || (o.country + ' ' + o.region + ' ' + o.notes + ' ' + o.process).toLowerCase().indexOf(t) >= 0);
+        (!q.island || islandOf(o) === q.island) && (!q.gi || o.gi) && (!q.onlyNew || o.isNew) &&
+        (!t || (o.country + ' ' + o.region + ' ' + o.notes + ' ' + o.process + ' ' + (o.gi || '') + ' ' + (o.varietals || '')).toLowerCase().indexOf(t) >= 0);
     });
+    var indo = all.filter(function (o) { return o.country === 'Indonesia'; });
+    var islands = ['Sumatra', 'Java', 'Bali & Nusa Tenggara', 'Sulawesi', 'Papua'];
     var groups = {};
     list.forEach(function (o) { (groups[o.country] = groups[o.country] || []).push(o); });
     var counts = SPECIES.map(function (s) { return s + ' ' + all.filter(function (o) { return o.species === s; }).length; }).join(' · ');
@@ -1697,6 +1861,11 @@
         el('select', { id: 'o-sp', value: q.species, style: 'flex:1;min-width:120px', onchange: function (e) { q.species = e.target.value; render(); } }, opt('', 'All species'), SPECIES.map(function (s) { return opt(s, s); })),
         el('select', { id: 'o-pr', value: q.process, style: 'flex:1;min-width:140px', onchange: function (e) { q.process = e.target.value; render(); } }, opt('', 'Any process'), PROCS.map(function (p) { return opt(p, procLabel(p)); })),
         el('select', { id: 'o-c', value: q.country, style: 'flex:1;min-width:140px', onchange: function (e) { q.country = e.target.value; render(); } }, opt('', 'All countries'), countries.map(function (c) { return opt(c, c); }))),
+      el('div', { class: 'row' },
+        el('span', { class: 'label' }, 'Indonesia: ' + indo.length + ' origins (' + indo.filter(function (o) { return o.species === 'arabica'; }).length + ' arabica · ' + indo.filter(function (o) { return o.species === 'robusta'; }).length + ' robusta)'),
+        el('select', { id: 'o-isl', value: q.island, style: 'width:auto', onchange: function (e) { q.island = e.target.value; render(); } }, opt('', 'All islands'), islands.map(function (i) { return opt(i, i + ' (' + indo.filter(function (o) { return islandOf(o) === i; }).length + ')'); })),
+        el('label', { class: 'row tight small' }, el('input', { type: 'checkbox', id: 'o-gi', checked: q.gi, onchange: function (e) { q.gi = e.target.checked; render(); } }), 'GI protected only'),
+        el('label', { class: 'row tight small' }, el('input', { type: 'checkbox', id: 'o-new', checked: q.onlyNew, onchange: function (e) { q.onlyNew = e.target.checked; render(); } }), 'Newly added (' + all.filter(function (o) { return o.isNew; }).length + ')')),
       el('div', { class: 'grid4 small muted' }, PROCS.map(function (p) { return el('span', null, el('b', null, procLabel(p) + ': '), E.PROCESSES[p].note); })),
       list.length ? Object.keys(groups).sort(function (a, b) { return a === 'Indonesia' ? -1 : b === 'Indonesia' ? 1 : a.localeCompare(b); }).map(function (c) {
         return el('section', { class: 'card' }, el('div', { class: 'row' }, el('h3', null, c), el('span', { class: 'muted small mono' }, groups[c].length)),
@@ -1704,8 +1873,10 @@
             el('thead', null, el('tr', null, el('th', null, 'Region'), PROCS.map(function (p) { return el('th', null, procLabel(p)); }), el('th', null, ''))),
             el('tbody', null, groups[c].map(function (o) {
               return el('tr', null,
-                el('td', { class: 'origin-cell' }, el('div', { class: 'row tight' }, el('b', null, o.region), speciesBadge(o.species)),
-                  el('div', { class: 'muted small' }, o.altitude), noteChips(o.notes)),
+                el('td', { class: 'origin-cell' }, el('div', { class: 'row tight' }, el('b', null, o.region), speciesBadge(o.species),
+                    o.gi ? el('span', { class: 'badge gi', title: 'Geographical Indication (Indikasi Geografis)' }, o.gi) : null, o.isNew ? el('span', { class: 'badge new' }, 'New') : null),
+                  el('div', { class: 'oi' }, el('span', { class: 'mono' }, o.altitude), o.varietals ? el('span', null, 'Varietals: ' + o.varietals) : null, islandOf(o) ? el('span', null, islandOf(o)) : null),
+                  noteChips(o.notes)),
                 PROCS.map(function (p) { return procCell(o, p); }),
                 el('td', null, el('div', { class: 'stack', style: 'gap:6px' },
                   el('button', { class: 'btn', type: 'button', onclick: function () { state.beanForm = blankBeanForm(o.id); go('beans'); } }, 'Add as my bean'),
