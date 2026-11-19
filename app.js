@@ -207,9 +207,14 @@
 
   // ---------- cloud sync (Supabase). Only the GitHub site loads the client and config. ----------
   var cloudClient = null, cloudPending = {};
+  // Writes that haven't reached the cloud yet survive a reload: they're kept per account and pushed before cloud data is applied.
+  var PENDING_KEY = 'rd.cloud.pending.v1';
+  function savePending() { lsSet(PENDING_KEY, { userId: state.cloud && state.cloud.userId, ops: cloudPending }); }
   function cloudAvailable() { return !!(window.RD_CLOUD && window.supabase && window.supabase.createClient); }
   function initCloud() {
     if (!cloudAvailable()) return;
+    var saved = lsGet(PENDING_KEY);
+    if (saved && saved.ops && typeof saved.ops === 'object') { cloudPending = saved.ops; state.pendingUser = saved.userId || null; }
     try {
       cloudClient = window.supabase.createClient(window.RD_CLOUD.url, window.RD_CLOUD.key, { auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true } });
     } catch (e) { cloudClient = null; return; }
@@ -224,7 +229,14 @@
     document.addEventListener('visibilitychange', function () { if (!document.hidden) cloudRefresh(); });
     render();
   }
-  function cloudErr(e) { return (e && (e.message || e.error_description || e.code)) || 'unknown error'; }
+  function cloudErr(e) {
+    var code = e && (e.code || e.error_code), msg = (e && (e.message || e.error_description)) || '';
+    if (code === 'email_address_not_authorized' || /not authorized/i.test(msg)) return 'Supabase\'s free email service only sends to the email of your Supabase account. Sign up with that email.';
+    if (code === 'over_email_send_rate_limit' || /rate limit/i.test(msg)) return 'Too many emails sent this hour. Wait an hour, then try again.';
+    if (code === 'email_not_confirmed' || /not confirmed/i.test(msg)) return 'Confirm your email first: open the confirmation email and tap the link, then sign in here.';
+    if (code === 'invalid_credentials' || /invalid login/i.test(msg)) return 'Wrong email or password.';
+    return msg || code || 'unknown error';
+  }
   async function cloudFetch() {
     var out = { beans: [], blends: [], batches: [], cuppings: [], settings: null }, from = 0;
     for (;;) {
@@ -247,12 +259,13 @@
   async function cloudWrite(col, id, data) {
     var key = col + '/' + id;
     cloudPending[key] = { col: col, id: id, data: data };
+    savePending();
     try {
       var r = data === null
         ? await cloudClient.from('ratio_docs').delete().eq('collection', col).eq('id', id)
         : await cloudClient.from('ratio_docs').upsert({ user_id: state.cloud.userId, collection: col, id: id, data: data, updated_at: new Date().toISOString() });
       if (r.error) throw r.error;
-      if (cloudPending[key] && cloudPending[key].data === data) delete cloudPending[key];
+      if (cloudPending[key] && cloudPending[key].data === data) { delete cloudPending[key]; savePending(); }
       state.cloud.lastSync = Date.now();
     } catch (e) {
       toast('Saved on this device, but the cloud couldn\'t be reached. It will sync when you\'re back online.', true);
@@ -267,7 +280,11 @@
   async function cloudRefresh() {
     if (state.mode !== 'cloud' || refreshing || Object.keys(cloudPending).length) { if (state.mode === 'cloud') cloudFlush(); return; }
     refreshing = true;
-    try { applyRemote(await cloudFetch()); state.cloud.lastSync = Date.now(); scheduleRender(); } catch (e) { /* keep the cached data */ }
+    try {
+      var remote = await cloudFetch();
+      // An edit made while the fetch was running wins: don't paint stale cloud data over it.
+      if (!Object.keys(cloudPending).length) { applyRemote(remote); state.cloud.lastSync = Date.now(); scheduleRender(); }
+    } catch (e) { /* keep the cached data */ }
     refreshing = false;
   }
   function localSnapshot() { var o = {}; COLS.forEach(function (c) { o[c] = state[c].slice(); }); o.settings = state.settings; return o; }
@@ -291,10 +308,20 @@
         await cloudClient.auth.signOut();
         return;
       }
+      var cacheIsThisAccount = state.localCloudUser === session.user.id;
+      // Push edits left over from an earlier visit (offline, or the tab closed) before reading the cloud.
+      if (Object.keys(cloudPending).length) {
+        if (state.pendingUser && state.pendingUser !== session.user.id) { cloudPending = {}; savePending(); }
+        else { state.mode = 'cloud'; await cloudFlush(); }
+      }
+      if (Object.keys(cloudPending).length) {
+        // Still couldn't push: keep working from this device's copy; it retries on reconnect.
+        state.mode = 'cloud'; C.status = 'signed-in'; C.msg = 'Some changes haven\'t reached the cloud yet. They will sync when the connection is back.';
+        render(); return;
+      }
       var remote = await cloudFetch();
       var remoteHas = COLS.some(function (c) { return remote[c].length; }) || !!remote.settings;
       var localHas = COLS.some(function (c) { return state[c].length; });
-      var cacheIsThisAccount = state.localCloudUser === session.user.id;
       if (!remoteHas && localHas) { state.mode = 'cloud'; await cloudUploadAll(localSnapshot()); C.msg = 'This device\'s data is now in the cloud.'; }
       else if (remoteHas && localHas && !cacheIsThisAccount) { C.conflict = remote; C.status = 'conflict'; render(); return; }
       else applyRemote(remote);
@@ -1351,7 +1378,8 @@
     var surprise = tastedLabels.filter(function (n) { return (c.predictedNotes || []).indexOf(n) < 0; });
     var beans = cupBeans(c), pcts = c.items.map(function (i) { return i.pct; });
     var preview = c.applied ? getDeltas(c) : {
-      attrs: E.calibrate(beans, pcts, c.predicted, c.actual || {}, rules()),
+      // Compare with what the model predicts now (current bean calibration and auto-tune), so no error is learned twice.
+      attrs: E.calibrate(beans, pcts, beans.every(function (b) { return !b.quick; }) ? E.profile(beans, pcts, c.brew, rules()) : c.predicted, c.actual || {}, rules()),
       notes: c.tastedNotes ? E.calibrateNotes(beans, pcts, c.brew, tasted, rules()) : {}
     };
     var ids = Object.keys(preview.attrs).concat(Object.keys(preview.notes)).filter(function (v, i, a) { return a.indexOf(v) === i; });
@@ -1737,7 +1765,7 @@
           ? await cloudClient.auth.signUp({ email: f.email.trim(), password: f.password, options: { emailRedirectTo: location.origin + location.pathname } })
           : await cloudClient.auth.signInWithPassword({ email: f.email.trim(), password: f.password });
         if (r.error) throw r.error;
-        if (kind === 'up' && !r.data.session) C.msg = 'Account created. Open the confirmation email, tap the link, then come back here and sign in.';
+        if (kind === 'up' && !r.data.session) C.msg = 'Account created. Open the confirmation email and tap the link. It may open an unrelated or blank page; that\'s fine. Then come back here and sign in.';
         f.password = '';
       } catch (e) { C.msg = cloudErr(e); }
       C.busy = false; render();
@@ -1764,7 +1792,7 @@
         el('div', { class: 'row' },
           el('button', { class: 'btn primary', type: 'button', disabled: C.busy || C.status === 'connecting', onclick: function () { doAuth('in'); } }, C.status === 'connecting' ? 'Connecting…' : 'Sign in'),
           el('button', { class: 'btn', type: 'button', disabled: C.busy, onclick: function () { doAuth('up'); } }, 'Create account')),
-        el('p', { class: 'muted small' }, 'Only one account can own this sync space: the first one to sign in.')];
+        el('p', { class: 'muted small' }, 'First time? Press Create account using the same email as your Supabase account (the free email service only sends confirmation emails there). Only one account can own this sync space: the first one to sign in.')];
     }
     return el('section', { class: 'card', 'aria-labelledby': 'cl-h', id: 'cloud' },
       el('h3', { id: 'cl-h' }, 'Cloud sync'), body, C.msg ? el('p', { class: 'small' }, C.msg) : null);
