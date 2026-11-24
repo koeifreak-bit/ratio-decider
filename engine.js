@@ -1095,6 +1095,112 @@
     };
   }
 
+  // ---------- uncertainty: how sure is the ratio? ----------
+  // How far a bean's taste scores may be off, in score points (1–5 scale), by where they came from.
+  var SCORE_UNCERTAINTY = { origin: 0.5, manual: 0.25, cupped: 0.15 };
+  var HOLD_TOL = 0.05;
+  function lcg(seed) { var s = (Math.floor(Number(seed) || 1) % 2147483647 + 2147483647) % 2147483647 || 1; return function () { s = s * 16807 % 2147483647; return (s - 1) / 2147483646; }; }
+  function pctile(sorted, q) { return sorted.length ? sorted[Math.min(sorted.length - 1, Math.max(0, Math.round(q * (sorted.length - 1))))] : null; }
+  // Re-solves the mix many times with each bean's scores nudged by a random amount within its uncertainty
+  // (seeded, so the same inputs always give the same answer). Returns, per bean, the 10th–90th percentile of the
+  // best share, and how often `opts.pcts` (the chosen ratio) still meets the target.
+  // Only the target fit is scored here (ranges, must / must-not, robusta cap, limits); the high-end gate is not.
+  function ratioUncertainty(beans, target, opts) {
+    opts = opts || {};
+    var n = beans.length, R = opts.rules || DEFAULTS, N = Math.max(5, Math.min(200, Number(opts.samples) || 40));
+    var rand = lcg(opts.seed == null ? 7 : opts.seed);
+    var amps = beans.map(function (b, i) {
+      var a = opts.amps && opts.amps[i] != null ? Number(opts.amps[i]) : SCORE_UNCERTAINTY[b.scoreSource] != null ? SCORE_UNCERTAINTY[b.scoreSource] : SCORE_UNCERTAINTY.origin;
+      return isFinite(a) && a > 0 ? a : 0;
+    });
+    // Keep it fast: whole percents up to 3 beans, 5% steps beyond (the spread is what matters, not the last 1%).
+    var step = Number(opts.step) === 5 || n >= 4 ? 5 : 1;
+    var bd = bounds(beans, R, opts.limits || []), mins = bd.mins.slice(), maxs = bd.maxs.slice();
+    if (step > 1 && n > 1) { mins = mins.map(function (m) { return Math.ceil(m / step) * step; }); maxs = maxs.map(function (m) { return Math.floor(m / step) * step; }); }
+    var chosen = Array.isArray(opts.pcts) && opts.pcts.length === n ? opts.pcts.map(Number) : null;
+    var shares = beans.map(function () { return []; }), holds = 0, solved = 0, out = { values: {} };
+    for (var k = 0; k < N; k++) {
+      var jb = beans.map(function (b, i) {
+        var s = {};
+        // Start from the bean's effective score (cupping corrections included), then nudge.
+        ATTRS.forEach(function (a) { s[a] = clamp(effScore(b, a) + (rand() * 2 - 1) * amps[i], 1, 5); });
+        return Object.assign({}, b, { scores: s, calib: null });
+      });
+      var ctx = prepare(jb, target, Object.assign({}, opts, { mode: 'taste' }));
+      // "Holds" = within 0,05 points of the target in total (far below what a cupper can taste; cupping uses 0,25 steps).
+      if (chosen && scoreInto(ctx, chosen, out).score <= HOLD_TOL) holds++;
+      var best = null, p = new Array(n);
+      (function rec(i, remaining, rob) {
+        if (i === n - 1) {
+          if (remaining < mins[i] || remaining > maxs[i]) return;
+          if (rob + (ctx.isRob[i] ? remaining : 0) > ctx.cap) return;
+          p[i] = remaining; scoreInto(ctx, p, out);
+          if (!best || compare(out, best) < 0) best = { score: out.score, center: out.center, spread: out.spread, mode: out.mode, pcts: p.slice() };
+          return;
+        }
+        var rest = 0; for (var j = i + 1; j < n; j++) rest += mins[j];
+        for (var v = Math.ceil(mins[i] / step) * step; v <= Math.min(maxs[i], remaining - rest); v += step) {
+          var r = rob + (ctx.isRob[i] ? v : 0);
+          if (r > ctx.cap) break;
+          p[i] = v; rec(i + 1, remaining - v, r);
+        }
+      })(0, 100, 0);
+      if (!best) continue;
+      solved++;
+      best.pcts.forEach(function (x, i) { shares[i].push(x); });
+    }
+    return {
+      samples: N, solved: solved, step: step, amps: amps,
+      beans: shares.map(function (list, i) {
+        var s = list.slice().sort(function (a, b) { return a - b; });
+        return { name: beans[i].name, lo: pctile(s, 0.1), mid: pctile(s, 0.5), hi: pctile(s, 0.9), amp: amps[i] };
+      }),
+      holds: chosen ? holds : null, holdRate: chosen ? round(holds / N, 2) : null
+    };
+  }
+
+  // ---------- accuracy report (from the cupping log) ----------
+  // entries: [{ predicted: {attr}, actual: {attr}, predictedNotes: [label], tasted: [label], createdAt }]
+  // Average miss and lean per attribute, how often predicted notes were really tasted, and whether newer
+  // cuppings miss less than older ones (a sign the learning works).
+  function accuracyReport(entries) {
+    var list = (entries || []).filter(function (e) { return e && e.predicted; }).slice().sort(function (a, b) { return (a.createdAt || 0) - (b.createdAt || 0); });
+    function stats(items) {
+      var per = {};
+      ATTRS.forEach(function (a) {
+        var errs = [];
+        items.forEach(function (e) {
+          var act = e.actual && e.actual[a], pre = e.predicted[a];
+          if (act == null || act === '' || !isFinite(act) || pre == null || !isFinite(pre)) return;
+          errs.push(Number(act) - Number(pre));
+        });
+        per[a] = errs.length ? { n: errs.length, mae: round(sum(errs.map(Math.abs)) / errs.length, 2), bias: round(sum(errs) / errs.length, 2),
+          within: round(errs.filter(function (x) { return Math.abs(x) <= 0.5 + 1e-9; }).length / errs.length, 2) } : { n: 0, mae: null, bias: null, within: null };
+      });
+      var all = ATTRS.filter(function (a) { return per[a].n; });
+      var overall = all.length ? round(sum(all.map(function (a) { return per[a].mae * per[a].n; })) / sum(all.map(function (a) { return per[a].n; })), 2) : null;
+      return { per: per, overall: overall };
+    }
+    var scored = list.filter(function (e) { return e.actual && ATTRS.some(function (a) { return e.actual[a] != null && e.actual[a] !== '' && isFinite(e.actual[a]); }); });
+    var whole = stats(scored);
+    // Notes: of the notes predicted at Supporting or above, how many were tasted (only cuppings that list tasted notes).
+    var predN = 0, hit = 0, withNotes = 0;
+    list.forEach(function (e) {
+      if (!e.tasted || !e.tasted.length) return;
+      withNotes++;
+      var t = e.tasted.map(lc);
+      (e.predictedNotes || []).forEach(function (n) { predN++; if (t.indexOf(lc(n)) >= 0) hit++; });
+    });
+    var trend = null;
+    if (scored.length >= 6) {
+      var half = Math.floor(scored.length / 2), older = stats(scored.slice(0, half)), newer = stats(scored.slice(scored.length - half));
+      trend = { older: older.overall, newer: newer.overall, n: half,
+        verdict: older.overall == null || newer.overall == null ? 'unknown' : newer.overall < older.overall - 0.05 ? 'better' : newer.overall > older.overall + 0.05 ? 'worse' : 'same' };
+    }
+    return { cuppings: list.length, scored: scored.length, per: whole.per, overall: whole.overall,
+      notes: { cuppings: withNotes, predicted: predN, tasted: hit, hitRate: predN ? round(hit / predN, 2) : null }, trend: trend };
+  }
+
   // ---------- bean picker ----------
   function combos(n, k, cb) {
     var idx = [];
@@ -1576,7 +1682,7 @@
   }
 
   root.RatioEngine = {
-    speciesShare: speciesShare, scaleFromBean: scaleFromBean, typicalNotes: typicalNotes, originAs: originAs, SPECIES_BASE: SPECIES_BASE,
+    speciesShare: speciesShare, scaleFromBean: scaleFromBean, ratioUncertainty: ratioUncertainty, accuracyReport: accuracyReport, SCORE_UNCERTAINTY: SCORE_UNCERTAINTY, typicalNotes: typicalNotes, originAs: originAs, SPECIES_BASE: SPECIES_BASE,
     originAllowed: originAllowed, fitBrewBias: fitBrewBias, substitutes: substitutes, similarity: similarity,
     VARIETALS: VARIETALS, ROAST_COLOURS: ROAST_COLOURS, ACID_TYPES: ACID_TYPES, WATER: WATER,
     scoresForVarietal: scoresForVarietal, acidProfile: acidProfile, recipeFor: recipeFor, roastColour: roastColour,

@@ -192,6 +192,16 @@ details > summary { cursor: pointer; font-weight: 600; }
 .oi { display: flex; flex-wrap: wrap; gap: 4px 10px; font-size: .78rem; color: var(--ink-2); }
 .badge.gi { background: var(--accent-soft); color: var(--accent); text-transform: none; letter-spacing: 0; }
 .badge.new { background: var(--ok-soft); color: var(--ok); }
+/* Likely range (uncertainty) */
+.range-box { display: grid; gap: 6px; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--line); }
+.range-rows { display: grid; gap: 6px; }
+.range-row { display: grid; grid-template-columns: minmax(0, 150px) minmax(0, 1fr) 64px; gap: 10px; align-items: center; font-size: .88rem; }
+.range-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.range-track { position: relative; height: 12px; background: var(--surface-2); border-radius: 6px; }
+.range-band { position: absolute; top: 0; bottom: 0; border-radius: 6px; opacity: .55; }
+.range-mark { position: absolute; top: -4px; width: 3px; height: 20px; margin-left: -1px; background: var(--ink); border-radius: 2px; }
+@media (max-width: 520px) { .range-row { grid-template-columns: minmax(0, 1fr) 64px; } .range-track { grid-column: 1 / -1; grid-row: 2; } }
+.acc-good { color: var(--ok); } .acc-fair { color: var(--warn); } .acc-weak { color: var(--bad); }
 /* Flavour picker (sidebar) */
 .fp { display: grid; gap: 6px; max-height: 60vh; overflow-y: auto; padding-right: 2px; }
 .fp-fam { border: 1px solid var(--line); border-radius: 8px; padding: 0; }

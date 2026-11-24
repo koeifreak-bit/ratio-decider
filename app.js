@@ -1254,6 +1254,54 @@
     var s = E.speciesShare(beans, pcts);
     return el('span', { class: 'pill species ' + (s.pure === 'arabica' ? 'ara' : 'mixed'), title: 'Species in this blend' }, s.label);
   }
+  // Likely range: re-solve with each bean's scores nudged within its uncertainty, so a ratio is shown as
+  // "about 65–79%" rather than an exact number the inputs can't support. Worked out after the result shows.
+  var rangeCache = { key: null, res: null, busy: false };
+  function rangeKey() { return JSON.stringify([simSig(), sim.pcts]); }
+  function ensureRange() {
+    var key = rangeKey();
+    if (rangeCache.key === key || rangeCache.busy) return;
+    rangeCache.busy = true;
+    setTimeout(function () {
+      try {
+        var k2 = rangeKey();
+        rangeCache.res = sim.pcts && simReady()
+          ? E.ratioUncertainty(simBeans(), simTarget(), Object.assign({}, solveOpts(), { pcts: sim.pcts, samples: 40, seed: 7 }))
+          : { solved: 0 };
+        rangeCache.key = k2;
+      } catch (e) { rangeCache.res = { solved: 0 }; rangeCache.key = key; }
+      rangeCache.busy = false;
+      if (state.route === 'simulator') refreshAfterManual();
+    }, 60);
+  }
+  function rangeBlock(beans) {
+    if (!sim.pcts || !beans.length) return null;
+    var fresh = rangeCache.key === rangeKey() ? rangeCache.res : null;
+    if (!fresh) { ensureRange(); return el('div', { class: 'range-box muted small' }, 'Working out the likely range…'); }
+    if (!fresh.solved) return null;
+    var widest = Math.max.apply(null, fresh.beans.map(function (b) { return (b.hi || 0) - (b.lo || 0); }));
+    // What matters is whether YOUR ratio keeps working when the scores are off; a wide range with a high hold rate
+    // just means many ratios work (room to adjust), not that this one is a guess.
+    var hr = fresh.holdRate == null ? 0 : fresh.holdRate;
+    var verdict = hr >= 0.9 ? ['ok', widest > 20 ? 'Reliable, with room to adjust' : 'Reliable'] : hr >= 0.6 ? ['warn', 'Probably works: cup it before a big batch'] : ['fail', 'Unreliable: cup these beans before trusting this ratio'];
+    var note = hr >= 0.9 && widest > 20 ? 'Many ratios meet this target, so the best share moves around a lot when the scores shift, but the one shown keeps working.'
+      : hr < 0.6 && widest > 20 ? 'The best ratio moves a lot when the scores shift. Cupping the catalogue-estimate beans narrows this most.' : null;
+    return el('div', { class: 'range-box' },
+      el('div', { class: 'row tight' }, el('span', { class: 'label' }, 'Likely range'), el('span', { class: 'spacer' }), el('span', { class: 'pill ' + verdict[0] }, verdict[1])),
+      el('div', { class: 'range-rows' }, fresh.beans.map(function (b, i) {
+        var lo = b.lo, hi = b.hi, cur = sim.pcts[i];
+        return el('div', { class: 'range-row' },
+          el('span', { class: 'range-name' }, el('span', { class: 'dot', style: 'background:' + BEAN_COLORS[i] }), ' ', b.name),
+          el('div', { class: 'range-track', role: 'img', 'aria-label': b.name + ': likely ' + lo + ' to ' + hi + ' percent, chosen ' + cur + ' percent' },
+            el('div', { class: 'range-band', style: 'left:' + lo + '%;width:' + Math.max(1, hi - lo) + '%;background:' + BEAN_COLORS[i] }),
+            el('div', { class: 'range-mark', style: 'left:' + cur + '%' })),
+          el('span', { class: 'mono small' }, lo === hi ? lo + '%' : lo + '–' + hi + '%'));
+      })),
+      el('p', { class: 'small' }, fresh.holdRate == null ? '' : 'This ratio still meets your target in ' + fresh.holds + ' of ' + fresh.samples + ' likely cases.'),
+      note ? el('p', { class: 'small' }, note) : null,
+      el('p', { class: 'muted small' }, 'Assumes each bean\'s scores may be off by ±0,5 (catalogue estimate), ±0,25 (your own scores) or ±0,15 (cupped), and re-solves ' + fresh.samples + ' times' +
+        (fresh.step > 1 ? ' in 5% steps' : '') + '. The range is where the best share landed 8 times in 10.'));
+  }
   // How far to trust this prediction: catalogue estimates haven't been checked on the actual lot yet.
   function confidenceLine(beans) {
     var est = beans.filter(function (b) { return b.scoreSource === 'origin'; });
@@ -1306,7 +1354,7 @@
     return el('section', { class: 'verdict ' + ev.status, 'aria-label': 'Verdict' },
       el('div', { class: 'row' }, statusPill(ev.status, ev.headline), ev.status !== 'fail' ? robustPill(ev.robust) : null, qualityPills(ev), el('span', { class: 'spacer' }),
         el('span', { class: 'muted small mono' }, sim.manual ? 'Your adjusted mix' : res.searched ? 'Best of ' + nf(res.searched) + ' mixes · ' + nf(res.ms) + ' ms' : 'From a saved blend or pick')),
-      ratioText(sim.pcts), ratioBar(sim.pcts), legend(beans, sim.pcts), shareBlock(beans, sim.pcts), confidenceLine(beans),
+      ratioText(sim.pcts), ratioBar(sim.pcts), legend(beans, sim.pcts), shareBlock(beans, sim.pcts), rangeBlock(beans), confidenceLine(beans),
       modeNote ? el('p', { class: 'muted small' }, modeNote) : null,
       round ? el('div', { class: 'row small' }, el('span', null, 'Rounder option: ', el('b', { class: 'mono' }, round.pcts.join(' : ')), ', also ' + round.headline.toLowerCase() + '. Easier to weigh.'),
         el('button', { class: 'btn ghost', type: 'button', onclick: function () { sim.pcts = round.pcts.slice(); sim.manual = true; simChanged(true); } }, 'Use ' + round.pcts.join(' : '))) : null,
@@ -1860,6 +1908,7 @@
       !state.cupDraft ? el('button', { class: 'btn', type: 'button', onclick: function () { if (!sim.pcts) { toast('Run the simulator first, then log a cupping for its mix.', true); go('simulator'); return; } startCupDraft('', sim.pcts); } }, '+ Log cupping for the current mix') : null)];
     if (state.cupDraft) parts.push(cupForm(state.cupDraft));
     if (!state.cuppings.length && !state.cupDraft) parts.push(el('div', { class: 'empty' }, el('p', null, 'No cupping entries yet. Plan a cupping table in the simulator, cup the coded samples blind, then log what you tasted here. To check a new lot on its own, use Cup this bean under My beans. Each entry can correct the simulator for your beans: their scores and which bag notes really come through.')));
+    if (state.cuppings.length) parts.push(accuracyCard());
     var F = filters.cupping;
     var list = state.cuppings.filter(function (c) {
       return (!F.clean || (F.clean === 'clean' ? c.clean : !c.clean)) &&
@@ -1871,6 +1920,45 @@
     parts.push(el('div', { class: 'list' }, list.map(cupCard)));
     if (state.cuppings.length && !list.length) parts.push(el('p', { class: 'muted small' }, 'No cupping entries match.'));
     return el('div', { class: 'stack' }, parts);
+  }
+  // How far the simulator's predictions missed what you actually tasted, from your own cupping log.
+  function accuracyCard() {
+    var rep = E.accuracyReport(state.cuppings.map(function (c) {
+      return { predicted: c.predicted, actual: c.actual, predictedNotes: c.predictedNotes || [], tasted: parse(c.tastedNotes).known.map(function (n) { return n.label; }), createdAt: c.createdAt };
+    }));
+    function grade(mae) { return mae == null ? '' : mae < 0.3 ? 'acc-good' : mae <= 0.6 ? 'acc-fair' : 'acc-weak'; }
+    function word(mae) { return mae == null ? '' : mae < 0.3 ? 'good' : mae <= 0.6 ? 'fair' : 'weak'; }
+    function lean(a, p) {
+      if (!p.n || p.bias == null || Math.abs(p.bias) < 0.15) return 'no clear lean';
+      var more = { body: 'heavier', acidity: 'brighter', sweetness: 'sweeter', bitterness: 'more bitter' }[a], less = { body: 'lighter', acidity: 'flatter', sweetness: 'less sweet', bitterness: 'less bitter' }[a];
+      return 'tastes ' + (p.bias > 0 ? more : less) + ' than predicted (' + (p.bias > 0 ? '+' : '') + nf(p.bias, 2) + ')';
+    }
+    var body = [];
+    if (!rep.scored) body.push(el('p', { class: 'small' }, 'Score body, acidity, sweetness or bitterness when you log a cupping, and this shows how far the predictions miss.'));
+    else {
+      body.push(el('p', null, 'Across ', el('b', null, rep.scored + ' scored cupping' + (rep.scored > 1 ? 's' : '')), ', predictions miss by ',
+        el('b', { class: grade(rep.overall) }, nf(rep.overall, 2) + ' points'), ' on average (1–5 scale): ', el('b', { class: grade(rep.overall) }, word(rep.overall)), '.'));
+      body.push(el('div', { class: 'tablewrap' }, el('table', null,
+        el('thead', null, el('tr', null, el('th', null, 'Attribute'), el('th', { class: 'num' }, 'Cuppings'), el('th', { class: 'num' }, 'Average miss'), el('th', { class: 'num' }, 'Within ±0,5'), el('th', null, 'Lean'))),
+        el('tbody', null, ATTRS.map(function (a) {
+          var p = rep.per[a];
+          return el('tr', null, el('td', null, AL[a]), el('td', { class: 'num mono' }, p.n || '—'),
+            el('td', { class: 'num mono ' + grade(p.mae) }, p.mae == null ? '—' : nf(p.mae, 2)),
+            el('td', { class: 'num mono' }, p.within == null ? '—' : nf(p.within * 100, 0) + '%'),
+            el('td', { class: 'small' }, p.n ? lean(a, p) : '—'));
+        })))));
+      body.push(el('p', { class: 'muted small' }, 'Good below 0,3 · fair 0,3–0,6 · weak above 0,6. Cupping scores move in 0,25 steps, so misses that small are within tasting noise.'));
+    }
+    if (rep.notes.cuppings) body.push(el('p', { class: 'small' }, 'Notes: of ' + rep.notes.predicted + ' notes predicted to come through, ' + rep.notes.tasted + ' were tasted' +
+      (rep.notes.hitRate != null ? ' (' + nf(rep.notes.hitRate * 100, 0) + '%)' : '') + ', over ' + rep.notes.cuppings + ' cupping' + (rep.notes.cuppings > 1 ? 's' : '') + ' with tasted notes.'));
+    if (rep.trend) body.push(el('p', { class: 'small' }, 'Learning: your newest ' + rep.trend.n + ' cuppings miss by ' + nf(rep.trend.newer, 2) + ', the oldest ' + rep.trend.n + ' by ' + nf(rep.trend.older, 2) + '. ',
+      el('b', { class: rep.trend.verdict === 'better' ? 'acc-good' : rep.trend.verdict === 'worse' ? 'acc-weak' : '' },
+        rep.trend.verdict === 'better' ? 'Getting more accurate.' : rep.trend.verdict === 'worse' ? 'Getting less accurate: check that learning is applied and the beans haven\'t changed lot.' : 'About the same.')));
+    else if (rep.scored) body.push(el('p', { class: 'muted small' }, 'After 6 scored cuppings this also shows whether learning is making it more accurate (' + rep.scored + ' so far).'));
+    var leaners = ATTRS.filter(function (a) { return rep.per[a].n >= 3 && Math.abs(rep.per[a].bias) >= 0.25; });
+    if (leaners.length) body.push(el('p', { class: 'small' }, 'It keeps missing in the same direction on ' + leaners.map(function (a) { return AL[a].toLowerCase(); }).join(' and ') +
+      '. Apply learning on those cuppings, or use Auto-tune under Settings, so the simulator corrects for it.'));
+    return el('section', { class: 'card', 'aria-labelledby': 'acc-h' }, el('h3', { id: 'acc-h' }, 'How accurate is it?'), body);
   }
   function scoreSelect(id, value, onchange) {
     var vals = ['', '1', '1.5', '2', '2.5', '3', '3.5', '4', '4.5', '5'];

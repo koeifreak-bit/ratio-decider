@@ -239,6 +239,43 @@
     eq(E.scaleFromBean([0, 100], 0, 500), null);
     eq(E.scaleFromBean([50, 50], 1, 0), null);
   });
+  // ---- accuracy (engine) ----
+  test('acc ratioUncertainty: no uncertainty gives the solver\'s ratio and always holds', function () {
+    var bs = [bean({ name: 'A', scores: { body: 2 } }), bean({ name: 'B', scores: { body: 5 } })];
+    var t = { ranges: { body: [3, 3] } };
+    var r = E.ratioUncertainty(bs, t, { brew: 'filter', index: idx, amps: [0, 0], pcts: [67, 33], samples: 10 });
+    eq([r.beans[0].lo, r.beans[0].hi], [67, 67]);
+    eq(r.holdRate, 1);
+  });
+  test('acc ratioUncertainty: wider for catalogue estimates than for cupped beans, and repeatable', function () {
+    var bs = [bean({ name: 'A', scores: { body: 3, acidity: 2.5 } }), bean({ name: 'B', scores: { body: 4.5, acidity: 3.5 } })];
+    var t = { ranges: { body: [3.6, 3.9], acidity: [2.8, 3.2] } }, o = { brew: 'filter', index: idx, samples: 60, seed: 3 };
+    var cat = E.ratioUncertainty(bs.map(function (b) { return Object.assign({}, b, { scoreSource: 'origin' }); }), t, o);
+    var cup = E.ratioUncertainty(bs.map(function (b) { return Object.assign({}, b, { scoreSource: 'cupped' }); }), t, o);
+    var w = function (r) { return r.beans[0].hi - r.beans[0].lo; };
+    ok(w(cat) > w(cup), 'catalogue ' + w(cat) + ' vs cupped ' + w(cup));
+    eq(cat.amps, [0.5, 0.5]); eq(cup.amps, [0.15, 0.15]);
+    eq(E.ratioUncertainty(bs, t, o).beans, E.ratioUncertainty(bs, t, o).beans, 'same seed, same answer');
+    ok(cat.beans[0].lo <= cat.beans[0].mid && cat.beans[0].mid <= cat.beans[0].hi);
+  });
+  test('acc ratioUncertainty respects robusta cap and uses 5% steps for 4+ beans', function () {
+    var bs = [bean({ name: 'A' }), bean({ name: 'R', species: 'robusta', scores: { body: 5 } }), bean({ name: 'C' }), bean({ name: 'D', scores: { body: 2 } })];
+    var r = E.ratioUncertainty(bs, { ranges: { body: [4, 5] }, robustaMax: 20 }, { brew: 'kopisusu', index: idx, samples: 8 });
+    eq(r.step, 5);
+    ok(r.beans[1].hi <= 20, 'robusta hi ' + r.beans[1].hi);
+  });
+  test('acc accuracyReport: miss, lean, notes and trend', function () {
+    var day = 86400000, list = [];
+    for (var i = 0; i < 6; i++) list.push({ createdAt: i * day, predicted: { body: 3, acidity: 3, sweetness: 3, bitterness: 3 },
+      actual: { body: i < 3 ? 4 : 3.2, acidity: 3 }, predictedNotes: ['Dark chocolate', 'Orange'], tasted: i === 0 ? ['dark chocolate', 'spice'] : [] });
+    var r = E.accuracyReport(list);
+    eq(r.scored, 6); eq(r.per.body.n, 6);
+    near(r.per.body.mae, (3 * 1 + 3 * 0.2) / 6, 0.01); ok(r.per.body.bias > 0, 'tastes heavier than predicted');
+    eq(r.per.acidity.mae, 0); eq(r.per.sweetness.n, 0);
+    eq(r.notes.predicted, 2); eq(r.notes.tasted, 1); eq(r.notes.hitRate, 0.5);
+    eq(r.trend.verdict, 'better'); ok(r.trend.newer < r.trend.older);
+    eq(E.accuracyReport([]).overall, null);
+  });
   test('v5 species share labels', function () {
     eq(E.speciesShare([{ species: 'arabica' }, { species: 'robusta' }], [69, 31]).label, 'Arabica 69% · Robusta 31%');
     eq(E.speciesShare([{ species: 'arabica' }, { species: 'arabica' }], [40, 60]).label, '100% arabica');
